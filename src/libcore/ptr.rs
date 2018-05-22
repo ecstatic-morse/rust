@@ -13,6 +13,49 @@
 //! Manually manage memory through raw pointers.
 //!
 //! *[See also the pointer primitive types](../../std/primitive.pointer.html).*
+//!
+//! # Safety
+//!
+//! ## Valid Pointers
+//!
+//! Most functions in this module [dereference raw pointers].
+//!
+//! In order for a pointer dereference to be safe, the pointer must be "valid".
+//! A valid pointer is one that satisfies **all** of the following conditions:
+//!
+//! * The pointer is not null.
+//! * The pointer is not dangling (it does not point to memory which has been
+//!   freed).
+//! * The pointer satisfies [LLVM's pointer aliasing rules].
+//!
+//! [dereference raw pointers]: https://doc.rust-lang.org/book/second-edition/ch19-01-unsafe-rust.html#dereferencing-a-raw-pointer
+//! [LLVM's pointer aliasing rules]: https://llvm.org/docs/LangRef.html#pointer-aliasing-rules
+//!
+//! ## Uninitialized Memory
+//!
+//! Working with uninitialized memory is not uncommon when using raw pointers.
+//! However, it is important to remember that no assumptions can be made about
+//! the *value* of uninitialized memory.
+//!
+//! For example, calling [`ptr::copy`] on an uninitialized buffer is
+//! well-defined, but the *value* of the memory in the destination buffer is
+//! not. This has some surprising implications:
+//!
+//! ```
+//! use std::{mem, ptr};
+//!
+//! unsafe {
+//!     let src: [usize; 256] = mem::uninitialized();
+//!     let mut dst: [usize; 256] = [0; 256];
+//!
+//!     // `dst` now also contains uninitialized memory.
+//!     ptr::copy(&src, &mut dst);
+//!
+//!     // However, we cannot make any assumptions about the value of
+//!     // uninitialized memory. The two buffers may or may not be equal!
+//!     // assert_eq!(&src[..], &dst[..]); // UNDEFINED!!!
+//! }
+//! ```
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -56,7 +99,7 @@ pub use intrinsics::write_bytes;
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `to_drop` must point to valid memory.
+/// * `to_drop` must be [valid].
 ///
 /// * `to_drop` must be properly aligned.
 ///
@@ -66,6 +109,7 @@ pub use intrinsics::write_bytes;
 /// again. [`write`] can be used to overwrite data without causing it to be
 /// dropped.
 ///
+/// [valid]: ../ptr/index.html#valid-pointers
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`write`]: ../ptr/fn.write.html
 ///
@@ -150,9 +194,11 @@ pub const fn null_mut<T>() -> *mut T { 0 as *mut T }
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `x` and `y` must point to valid, initialized memory.
+/// * Both `x` and `y` must be [valid].
 ///
-/// * `x` and `y` must be properly aligned.
+/// * Both `x` and `y` must be properly aligned.
+///
+/// [valid]: ../ptr/index.html#valid-pointers
 ///
 /// # Examples
 ///
@@ -303,9 +349,11 @@ unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, len: usize) {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `dest` must point to valid, initialized memory.
+/// * `dest` must be [valid].
 ///
 /// * `dest` must be properly aligned.
+///
+/// [valid]: ../ptr/index.html#valid-pointers
 ///
 /// # Examples
 ///
@@ -337,7 +385,7 @@ pub unsafe fn replace<T>(dest: *mut T, mut src: T) -> T {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `src` must point to valid, initialized memory.
+/// * `src` must be [valid].
 ///
 /// * `src` must be properly aligned. Use [`read_unaligned`] if this is not the
 ///   case.
@@ -349,6 +397,7 @@ pub unsafe fn replace<T>(dest: *mut T, mut src: T) -> T {
 /// as a use because it will attempt to drop the value previously at `*src`.
 /// [`write`] can be used to overwrite data without causing it to be dropped.
 ///
+/// [valid]: ../ptr/index.html#valid-pointers
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`read_unaligned`]: ./fn.read_unaligned.html
 /// [`write`]: ./fn.write.html
@@ -422,16 +471,17 @@ pub unsafe fn read<T>(src: *const T) -> T {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `src` must point to valid, initialized memory.
+/// * `src` must be [valid].
 ///
 /// Additionally, if `T` is not [`Copy`], only the returned value *or* the
 /// pointed-to value can be used or dropped after calling `read_unaligned`.
 /// `read_unaligned` creates a bitwise copy of `T`, regardless of whether `T:
 /// Copy`, and this can result in undefined behavior if both copies are used.
 /// Note that `*src = foo` counts as a use because it will attempt to drop the
-/// value previously at `*src`.  [`write_unaligned`] can be used to overwrite
+/// value previously at `*src`. [`write_unaligned`] can be used to overwrite
 /// data without causing it to be dropped.
 ///
+/// [valid]: ../ptr/index.html#valid-pointers
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`write_unaligned`]: ./fn.write_unaligned.html
 ///
@@ -500,11 +550,12 @@ pub unsafe fn read_unaligned<T>(src: *const T) -> T {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `dst` must point to valid memory.
+/// * `dst` must be [valid].
 ///
 /// * `dst` must be properly aligned. Use [`write_unaligned`] if this is not the
 ///   case.
 ///
+/// [valid]: ../ptr/index.html#valid-pointers
 /// [`write_unaligned`]: ./fn.write_unaligned.html
 ///
 /// # Examples
@@ -573,7 +624,9 @@ pub unsafe fn write<T>(dst: *mut T, src: T) {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `dst` must point to valid memory.
+/// * `dst` must be [valid].
+///
+/// [valid]: ../ptr/index.html#valid-pointers
 ///
 /// # Examples
 ///
@@ -645,7 +698,7 @@ pub unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `src` must point to valid, initialized memory.
+/// * `src` must be [valid].
 ///
 /// * `src` must be properly aligned.
 ///
@@ -654,6 +707,7 @@ pub unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
 /// undefined behavior. However, storing non-[`Copy`] data in I/O memory is
 /// almost certainly incorrect.
 ///
+/// [valid]: ../ptr/index.html#valid-pointers
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`read`]: ./fn.read.html
 ///
@@ -712,9 +766,11 @@ pub unsafe fn read_volatile<T>(src: *const T) -> T {
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
-/// * `dst` must point to valid memory.
+/// * `dst` must be [valid].
 ///
 /// * `dst` must be properly aligned.
+///
+/// [valid]: ../ptr/index.html#valid-pointers
 ///
 /// # Examples
 ///

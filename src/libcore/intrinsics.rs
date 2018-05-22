@@ -973,18 +973,19 @@ extern "rust-intrinsic" {
     ///
     /// Behavior is undefined if any of the following conditions are violated:
     ///
-    /// * The region of memory which begins at `src` and has a length of
-    ///   `count * size_of::<T>()` bytes must be *both* valid and initialized.
+    /// * Both `src` and `dst` must be [valid].
     ///
-    /// * The region of memory which begins at `dst` and has a length of
-    ///   `count * size_of::<T>()` bytes must be valid (but may or may not be
-    ///   initialized).
+    /// * Both `src` and `dst` must be properly aligned.
+    ///
+    /// * `src.offset(count)` must be [valid]. In other words, the region of
+    ///   memory which begins at `src` and has a length of `count *
+    ///   size_of::<T>()` bytes must belong to a single, live allocation.
+    ///
+    /// * `dst.offset(count)` must be [valid]. In other words, the region of
+    ///   memory which begins at `dst` and has a length of `count *
+    ///   size_of::<T>()` bytes must belong to a single, live allocation.
     ///
     /// * The two regions of memory must *not* overlap.
-    ///
-    /// * `src` must be properly aligned.
-    ///
-    /// * `dst` must be properly aligned.
     ///
     /// Additionally, if `T` is not [`Copy`], only the region at `src` *or* the
     /// region at `dst` can be used or dropped after calling
@@ -992,6 +993,7 @@ extern "rust-intrinsic" {
     /// `T`, regardless of whether `T: Copy`, which can result in undefined
     /// behavior if both copies are used.
     ///
+    /// [valid]: ../ptr/index.html#valid-pointers
     /// [`Copy`]: ../marker/trait.Copy.html
     ///
     /// # Examples
@@ -1058,22 +1060,24 @@ extern "rust-intrinsic" {
     ///
     /// Behavior is undefined if any of the following conditions are violated:
     ///
-    /// * The region of memory which begins at `src` and has a length of
-    ///   `count * size_of::<T>()` bytes must be *both* valid and initialized.
+    /// * Both `src` and `dst` must be [valid].
     ///
-    /// * The region of memory which begins at `dst` and has a length of
-    ///   `count * size_of::<T>()` bytes must be valid (but may or may not be
-    ///   initialized).
+    /// * Both `src` and `dst` must be properly aligned.
     ///
-    /// * `src` must be properly aligned.
+    /// * `src.offset(count)` must be [valid]. In other words, the region of
+    ///   memory which begins at `src` and has a length of `count *
+    ///   size_of::<T>()` bytes must belong to a single, live allocation.
     ///
-    /// * `dst` must be properly aligned.
+    /// * `dst.offset(count)` must be [valid]. In other words, the region of
+    ///   memory which begins at `dst` and has a length of `count *
+    ///   size_of::<T>()` bytes must belong to a single, live allocation.
     ///
     /// Additionally, if `T` is not [`Copy`], only the region at `src` *or* the
     /// region at `dst` can be used or dropped after calling `copy`. `copy`
     /// creates bitwise copies of `T`, regardless of whether `T: Copy`, which
     /// can result in undefined behavior if both copies are used.
     ///
+    /// [valid]: ../ptr/index.html#valid-pointers
     /// [`Copy`]: ../marker/trait.Copy.html
     ///
     /// # Examples
@@ -1097,7 +1101,8 @@ extern "rust-intrinsic" {
     /// Sets `count * size_of::<T>()` bytes of memory starting at `dst` to
     /// `val`.
     ///
-    /// `write_bytes` is semantically equivalent to C's [`memset`].
+    /// `write_bytes` is similar to C's [`memset`], but sets `count *
+    /// size_of::<T>()` bytes to `val`.
     ///
     /// [`memset`]: https://www.gnu.org/software/libc/manual/html_node/Copying-Strings-and-Arrays.html#index-memset
     ///
@@ -1105,15 +1110,20 @@ extern "rust-intrinsic" {
     ///
     /// Behavior is undefined if any of the following conditions are violated:
     ///
-    /// * The region of memory which begins at `dst` and has a length of
-    ///   `count` bytes must be valid.
+    /// * `dst` must be [valid].
+    ///
+    /// * `dst.offset(count)` must be [valid]. In other words, the region of
+    ///   memory which begins at `dst` and has a length of `count *
+    ///   size_of::<T>()` bytes must belong to a single, live allocation.
     ///
     /// * `dst` must be properly aligned.
     ///
-    /// Additionally, the caller must ensure that writing `count` bytes to the
-    /// given region of memory results in a valid value of `T`. Creating an
-    /// invalid value of `T` can result in undefined behavior. An example is
-    /// provided below.
+    /// Additionally, the caller must ensure that writing `count *
+    /// size_of::<T>()` bytes to the given region of memory results in a valid
+    /// value of `T`. Creating an invalid value of `T` can result in undefined
+    /// behavior. An example is provided below.
+    ///
+    /// [valid]: ../ptr/index.html#valid-pointers
     ///
     /// # Examples
     ///
@@ -1122,12 +1132,12 @@ extern "rust-intrinsic" {
     /// ```
     /// use std::ptr;
     ///
-    /// let mut vec = vec![0; 4];
+    /// let mut vec = vec![0u32; 4];
     /// unsafe {
     ///     let vec_ptr = vec.as_mut_ptr();
-    ///     ptr::write_bytes(vec_ptr, b'a', 2);
+    ///     ptr::write_bytes(vec_ptr, 0xfe, 2);
     /// }
-    /// assert_eq!(vec, [b'a', b'a', 0, 0]);
+    /// assert_eq!(vec, [0xfefefefe, 0xfefefefe, 0, 0]);
     /// ```
     ///
     /// Creating an invalid value:
@@ -1140,7 +1150,7 @@ extern "rust-intrinsic" {
     /// unsafe {
     ///     // Leaks the previously held value by overwriting the `Box<T>` with
     ///     // a null pointer.
-    ///     ptr::write_bytes(&mut v, 0, mem::size_of::<Box<i32>>());
+    ///     ptr::write_bytes(&mut v, 0, 1);
     /// }
     ///
     /// // At this point, using or dropping `v` results in undefined behavior.
