@@ -390,17 +390,45 @@ pub unsafe fn replace<T>(dest: *mut T, mut src: T) -> T {
 /// * `src` must be properly aligned. Use [`read_unaligned`] if this is not the
 ///   case.
 ///
-/// Additionally, if `T` is not [`Copy`], only the returned value *or* the
-/// pointed-to value can be used or dropped after calling `read`. `read` creates
-/// a bitwise copy of `T`, regardless of whether `T: Copy`, which can result
-/// in undefined behavior if both copies are used. Note that `*src = foo` counts
-/// as a use because it will attempt to drop the value previously at `*src`.
+/// ## Ownership of the Returned Value
+///
+/// `read` creates a bitwise copy of `T`, regardless of whether `T` is [`Copy`].
+/// If `T` is not [`Copy`], using both the returned value and the value at
+/// `*src` can violate memory safety.  Note that assigning to `src` counts as a
+/// use because it will attempt to drop the value at `*src`.
+///
 /// [`write`] can be used to overwrite data without causing it to be dropped.
 ///
 /// [valid]: ../ptr/index.html#valid-pointers
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`read_unaligned`]: ./fn.read_unaligned.html
 /// [`write`]: ./fn.write.html
+///
+/// ```
+/// use std::ptr;
+///
+/// let mut s = String::new("foo");
+/// unsafe {
+///     // `s2` now points to the same underlying memory as `s1`.
+///     let mut s2 = ptr::read(&s);
+///
+///     assert_eq!(s2, "foo");
+///
+///     // Assigning to `s2` causes its original value to be dropped. Beyond
+///     // this point, `s` must no longer be used, as the underlying memory has
+///     // been freed.
+///     s2 = String::default();
+///
+///     // Assigning to `s` would cause the old value to be dropped again,
+///     // resulting in undefined behavior.
+///     // s = String::new("bar"); // ERROR
+///
+///     // `ptr::write` can be used to overwrite a value without dropping it.
+///     ptr::write(&s, String::new("bar"));
+/// }
+///
+/// assert_eq!(s, "bar");
+/// ```
 ///
 /// # Examples
 ///
@@ -465,25 +493,21 @@ pub unsafe fn read<T>(src: *const T) -> T {
 ///
 /// Unlike [`read`], `read_unaligned` works with unaligned pointers.
 ///
-/// [`read`]: ./fn.read.html
-///
 /// # Safety
 ///
 /// Behavior is undefined if any of the following conditions are violated:
 ///
 /// * `src` must be [valid].
 ///
-/// Additionally, if `T` is not [`Copy`], only the returned value *or* the
-/// pointed-to value can be used or dropped after calling `read_unaligned`.
-/// `read_unaligned` creates a bitwise copy of `T`, regardless of whether `T:
-/// Copy`, and this can result in undefined behavior if both copies are used.
-/// Note that `*src = foo` counts as a use because it will attempt to drop the
-/// value previously at `*src`. [`write_unaligned`] can be used to overwrite
-/// data without causing it to be dropped.
+/// Like [`read`], `read_unaligned` creates a bitwise copy of `T`, regardless of
+/// whether `T` is [`Copy`].  If `T` is not [`Copy`], using both the returned
+/// value and the value at `*src` can [violate memory safety][read-ownership].
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
 /// [`Copy`]: ../marker/trait.Copy.html
+/// [`read`]: ./fn.read.html
 /// [`write_unaligned`]: ./fn.write_unaligned.html
+/// [read-ownership]: ./fn.read.html#ownership-of-the-returned-value
+/// [valid]: ../ptr/index.html#valid-pointers
 ///
 /// # Examples
 ///
@@ -702,10 +726,11 @@ pub unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
 ///
 /// * `src` must be properly aligned.
 ///
-/// Like [`read`], `read_volatile` creates a bitwise copy of the pointed-to
-/// object, regardless of whether `T` is [`Copy`]. Using both values can cause
-/// undefined behavior. However, storing non-[`Copy`] data in I/O memory is
-/// almost certainly incorrect.
+/// Like [`read`], `read_unaligned` creates a bitwise copy of `T`, regardless of
+/// whether `T` is [`Copy`].  If `T` is not [`Copy`], using both the returned
+/// value and the value at `*src` can [violate memory safety][read-ownership].
+/// However, storing non-[`Copy`] types in volatile memory is almost certainly
+/// incorrect.
 ///
 /// [valid]: ../ptr/index.html#valid-pointers
 /// [`Copy`]: ../marker/trait.Copy.html

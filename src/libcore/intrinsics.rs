@@ -987,14 +987,15 @@ extern "rust-intrinsic" {
     ///
     /// * The two regions of memory must *not* overlap.
     ///
-    /// Additionally, if `T` is not [`Copy`], only the region at `src` *or* the
-    /// region at `dst` can be used or dropped after calling
-    /// `copy_nonoverlapping`.  `copy_nonoverlapping` creates bitwise copies of
-    /// `T`, regardless of whether `T: Copy`, which can result in undefined
-    /// behavior if both copies are used.
+    /// Like [`read`], `copy` creates a bitwise copy of `T`, regardless of
+    /// whether `T` is [`Copy`].  If `T` is not [`Copy`], using both the values
+    /// in the region beginning at `*src` and the region beginning at `*dst` can
+    /// [violate memory safety][read-ownership].
     ///
-    /// [valid]: ../ptr/index.html#valid-pointers
     /// [`Copy`]: ../marker/trait.Copy.html
+    /// [`read`]: ../ptr/fn.read.html
+    /// [read-ownership]: ../ptr/fn.read.html#ownership-of-the-returned-value
+    /// [valid]: ../ptr/index.html#valid-pointers
     ///
     /// # Examples
     ///
@@ -1072,13 +1073,15 @@ extern "rust-intrinsic" {
     ///   memory which begins at `dst` and has a length of `count *
     ///   size_of::<T>()` bytes must belong to a single, live allocation.
     ///
-    /// Additionally, if `T` is not [`Copy`], only the region at `src` *or* the
-    /// region at `dst` can be used or dropped after calling `copy`. `copy`
-    /// creates bitwise copies of `T`, regardless of whether `T: Copy`, which
-    /// can result in undefined behavior if both copies are used.
+    /// Like [`read`], `copy` creates a bitwise copy of `T`, regardless of
+    /// whether `T` is [`Copy`].  If `T` is not [`Copy`], using both the values
+    /// in the region beginning at `*src` and the region beginning at `*dst` can
+    /// [violate memory safety][read-ownership].
     ///
-    /// [valid]: ../ptr/index.html#valid-pointers
     /// [`Copy`]: ../marker/trait.Copy.html
+    /// [`read`]: ../ptr/fn.read.html
+    /// [read-ownership]: ../ptr/fn.read.html#ownership-of-the-returned-value
+    /// [valid]: ../ptr/index.html#valid-pointers
     ///
     /// # Examples
     ///
@@ -1121,7 +1124,7 @@ extern "rust-intrinsic" {
     /// Additionally, the caller must ensure that writing `count *
     /// size_of::<T>()` bytes to the given region of memory results in a valid
     /// value of `T`. Creating an invalid value of `T` can result in undefined
-    /// behavior. An example is provided below.
+    /// behavior.
     ///
     /// [valid]: ../ptr/index.html#valid-pointers
     ///
