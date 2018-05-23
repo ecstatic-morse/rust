@@ -16,8 +16,6 @@
 //!
 //! # Safety
 //!
-//! ## Valid Pointers
-//!
 //! Most functions in this module [dereference raw pointers].
 //!
 //! In order for a pointer dereference to be safe, the pointer must be "valid".
@@ -30,32 +28,6 @@
 //!
 //! [dereference raw pointers]: https://doc.rust-lang.org/book/second-edition/ch19-01-unsafe-rust.html#dereferencing-a-raw-pointer
 //! [LLVM's pointer aliasing rules]: https://llvm.org/docs/LangRef.html#pointer-aliasing-rules
-//!
-//! ## Uninitialized Memory
-//!
-//! Working with uninitialized memory is not uncommon when using raw pointers.
-//! However, it is important to remember that no assumptions can be made about
-//! the *value* of uninitialized memory.
-//!
-//! For example, calling [`ptr::copy`] on an uninitialized buffer is
-//! well-defined, but the *value* of the memory in the destination buffer is
-//! not. This has some surprising implications:
-//!
-//! ```
-//! use std::{mem, ptr};
-//!
-//! unsafe {
-//!     let src: [usize; 256] = mem::uninitialized();
-//!     let mut dst: [usize; 256] = [0; 256];
-//!
-//!     // `dst` now also contains uninitialized memory.
-//!     ptr::copy(&src, &mut dst);
-//!
-//!     // However, we cannot make any assumptions about the value of
-//!     // uninitialized memory. The two buffers may or may not be equal!
-//!     // assert_eq!(&src[..], &dst[..]); // UNDEFINED!!!
-//! }
-//! ```
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -109,7 +81,7 @@ pub use intrinsics::write_bytes;
 /// again. [`write`] can be used to overwrite data without causing it to be
 /// dropped.
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`write`]: ../ptr/fn.write.html
 ///
@@ -198,7 +170,7 @@ pub const fn null_mut<T>() -> *mut T { 0 as *mut T }
 ///
 /// * Both `x` and `y` must be properly aligned.
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 ///
 /// # Examples
 ///
@@ -353,7 +325,7 @@ unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, len: usize) {
 ///
 /// * `dest` must be properly aligned.
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 ///
 /// # Examples
 ///
@@ -399,7 +371,7 @@ pub unsafe fn replace<T>(dest: *mut T, mut src: T) -> T {
 ///
 /// [`write`] can be used to overwrite data without causing it to be dropped.
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`read_unaligned`]: ./fn.read_unaligned.html
 /// [`write`]: ./fn.write.html
@@ -507,7 +479,7 @@ pub unsafe fn read<T>(src: *const T) -> T {
 /// [`read`]: ./fn.read.html
 /// [`write_unaligned`]: ./fn.write_unaligned.html
 /// [read-ownership]: ./fn.read.html#ownership-of-the-returned-value
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 ///
 /// # Examples
 ///
@@ -579,7 +551,7 @@ pub unsafe fn read_unaligned<T>(src: *const T) -> T {
 /// * `dst` must be properly aligned. Use [`write_unaligned`] if this is not the
 ///   case.
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 /// [`write_unaligned`]: ./fn.write_unaligned.html
 ///
 /// # Examples
@@ -650,7 +622,7 @@ pub unsafe fn write<T>(dst: *mut T, src: T) {
 ///
 /// * `dst` must be [valid].
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 ///
 /// # Examples
 ///
@@ -732,7 +704,7 @@ pub unsafe fn write_unaligned<T>(dst: *mut T, src: T) {
 /// However, storing non-[`Copy`] types in volatile memory is almost certainly
 /// incorrect.
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 /// [`Copy`]: ../marker/trait.Copy.html
 /// [`read`]: ./fn.read.html
 ///
@@ -795,7 +767,7 @@ pub unsafe fn read_volatile<T>(src: *const T) -> T {
 ///
 /// * `dst` must be properly aligned.
 ///
-/// [valid]: ../ptr/index.html#valid-pointers
+/// [valid]: ../ptr/index.html#safety
 ///
 /// # Examples
 ///

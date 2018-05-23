@@ -995,7 +995,7 @@ extern "rust-intrinsic" {
     /// [`Copy`]: ../marker/trait.Copy.html
     /// [`read`]: ../ptr/fn.read.html
     /// [read-ownership]: ../ptr/fn.read.html#ownership-of-the-returned-value
-    /// [valid]: ../ptr/index.html#valid-pointers
+    /// [valid]: ../ptr/index.html#safety
     ///
     /// # Examples
     ///
@@ -1081,7 +1081,7 @@ extern "rust-intrinsic" {
     /// [`Copy`]: ../marker/trait.Copy.html
     /// [`read`]: ../ptr/fn.read.html
     /// [read-ownership]: ../ptr/fn.read.html#ownership-of-the-returned-value
-    /// [valid]: ../ptr/index.html#valid-pointers
+    /// [valid]: ../ptr/index.html#safety
     ///
     /// # Examples
     ///
@@ -1126,7 +1126,7 @@ extern "rust-intrinsic" {
     /// value of `T`. Creating an invalid value of `T` can result in undefined
     /// behavior.
     ///
-    /// [valid]: ../ptr/index.html#valid-pointers
+    /// [valid]: ../ptr/index.html#safety
     ///
     /// # Examples
     ///
