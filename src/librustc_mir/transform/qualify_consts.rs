@@ -622,33 +622,16 @@ define_qualif_indices!(
 );
 static_assert!(QUALIF_COUNT == 4);
 
-impl ConstCx<'_, 'tcx> {
-    fn qualifs_in_any_const_safe_value_of_ty(&self, ty: Ty<'tcx>) -> PerQualif<bool> {
-        let mut qualifs = PerQualif::default();
-        qualifs[HasMutInterior] = HasMutInterior::in_any_const_safe_value_of_ty(self, ty);
-        qualifs[NeedsDrop] = NeedsDrop::in_any_const_safe_value_of_ty(self, ty);
-        qualifs[IsNotPromotable] = IsNotPromotable::in_any_const_safe_value_of_ty(self, ty);
-        qualifs[IsNotImplicitlyPromotable] =
-            IsNotImplicitlyPromotable::in_any_const_safe_value_of_ty(self, ty);
-        qualifs
-    }
-
-    fn qualifs_in_local(&self, local: Local) -> PerQualif<bool> {
-        let mut qualifs = PerQualif::default();
-        qualifs[HasMutInterior] = HasMutInterior::in_local(self, local);
-        qualifs[NeedsDrop] = NeedsDrop::in_local(self, local);
-        qualifs[IsNotPromotable] = IsNotPromotable::in_local(self, local);
-        qualifs[IsNotImplicitlyPromotable] = IsNotImplicitlyPromotable::in_local(self, local);
-        qualifs
-    }
-
-    fn qualifs_in_value(&self, source: ValueSource<'_, 'tcx>) -> PerQualif<bool> {
-        let mut qualifs = PerQualif::default();
-        qualifs[HasMutInterior] = HasMutInterior::in_value(self, source);
-        qualifs[NeedsDrop] = NeedsDrop::in_value(self, source);
-        qualifs[IsNotPromotable] = IsNotPromotable::in_value(self, source);
-        qualifs[IsNotImplicitlyPromotable] = IsNotImplicitlyPromotable::in_value(self, source);
-        qualifs
+macro_rules! collect_qualifs {
+    ( Q :: $fn:ident ( $($args:expr),* ) ) => {
+        {
+            let mut qualifs = PerQualif::default();
+            qualifs[HasMutInterior] = HasMutInterior::$fn($($args),*);
+            qualifs[NeedsDrop] = NeedsDrop::$fn($($args),*);
+            qualifs[IsNotPromotable] = IsNotPromotable::$fn($($args),*);
+            qualifs[IsNotImplicitlyPromotable] = IsNotImplicitlyPromotable::$fn($($args),*);
+            qualifs
+        }
     }
 }
 
@@ -704,7 +687,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 
         for (local, decl) in body.local_decls.iter_enumerated() {
             if let LocalKind::Arg = body.local_kind(local) {
-                let qualifs = cx.qualifs_in_any_const_safe_value_of_ty(decl.ty);
+                let qualifs = collect_qualifs!(Q::in_any_const_safe_value_of_ty(&cx, decl.ty));
                 for (per_local, qualif) in &mut cx.per_local.as_mut().zip(qualifs).0 {
                     if *qualif {
                         per_local.insert(local);
@@ -758,7 +741,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
     fn assign(&mut self, dest: &Place<'tcx>, source: ValueSource<'_, 'tcx>, location: Location) {
         trace!("assign: {:?} <- {:?}", dest, source);
 
-        let mut qualifs = self.qualifs_in_value(source);
+        let mut qualifs = collect_qualifs!(Q::in_value(self, source));
 
         match source {
             ValueSource::Rvalue(&Rvalue::Ref(_, kind, ref place)) => {
@@ -830,7 +813,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                             // This allows borrowing fields which don't have
                             // `HasMutInterior`, from a type that does, e.g.:
                             // `let _: &'static _ = &(Cell::new(1), 2).1;`
-                            let mut local_qualifs = self.qualifs_in_local(*local);
+                            let mut local_qualifs = collect_qualifs!(Q::in_local(self, *local));
                             // Any qualifications, except HasMutInterior (see above), disqualify
                             // from promotion.
                             // This is, in particular, the "implicit promotion" version of
@@ -1007,12 +990,12 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             }
         }
 
-        let mut qualifs = self.qualifs_in_local(RETURN_PLACE);
+        let mut qualifs = collect_qualifs!(Q::in_local(self, RETURN_PLACE));
 
         // Account for errors in consts by using the
         // conservative type qualification instead.
         if qualifs[IsNotPromotable] {
-            qualifs = self.qualifs_in_any_const_safe_value_of_ty(body.return_ty());
+            qualifs = collect_qualifs!(Q::in_any_const_safe_value_of_ty(self, body.return_ty()));
         }
 
         (qualifs.encode_to_bits(), self.tcx.arena.alloc(promoted_temps))
