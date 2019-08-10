@@ -160,15 +160,15 @@ trait QualifIdx {
 /// The default implementations proceed structurally.
 trait Qualif: QualifIdx {
     /// Return the qualification that is (conservatively) correct for any value
-    /// of the type, or `None` if the qualification is not value/type-based.
-    fn in_any_value_of_ty(_cx: &ConstCx<'_, 'tcx>, _ty: Ty<'tcx>) -> Option<bool> {
-        None
+    /// of the type.
+    fn in_any_value_of_ty(_cx: &ConstCx<'_, 'tcx>, _ty: Ty<'tcx>) -> bool {
+        true
     }
 
-    /// Return a mask for the qualification, given a type. This is `false` iff
-    /// no value of that type can have the qualification.
-    fn mask_for_ty(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> bool {
-        Self::in_any_value_of_ty(cx, ty).unwrap_or(true)
+    /// Return the qualification that is (conservatively) correct for any value
+    /// of the type that is known to be const-safe.
+    fn in_any_const_safe_value_of_ty(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> bool {
+        Self::in_any_value_of_ty(cx, ty)
     }
 
     fn in_local(cx: &ConstCx<'_, '_>, local: Local) -> bool {
@@ -190,7 +190,7 @@ trait Qualif: QualifIdx {
             base: place.base,
             projection: &proj.base,
         });
-        let qualif = base_qualif && Self::mask_for_ty(
+        let qualif = base_qualif && Self::in_any_value_of_ty(
             cx,
             Place::ty_from(place.base, &proj.base, cx.body, cx.tcx)
                 .projection_ty(cx.tcx, &proj.elem)
@@ -249,7 +249,7 @@ trait Qualif: QualifIdx {
                 if let ConstValue::Unevaluated(def_id, _) = constant.literal.val {
                     // Don't peek inside trait associated constants.
                     if cx.tcx.trait_of_item(def_id).is_some() {
-                        Self::in_any_value_of_ty(cx, constant.ty).unwrap_or(false)
+                        Self::in_any_const_safe_value_of_ty(cx, constant.ty)
                     } else {
                         let (bits, _) = cx.tcx.at(constant.span).mir_const_qualif(def_id);
 
@@ -258,7 +258,7 @@ trait Qualif: QualifIdx {
                         // Just in case the type is more specific than
                         // the definition, e.g., impl associated const
                         // with type parameters, take it into account.
-                        qualif && Self::mask_for_ty(cx, constant.ty)
+                        qualif && Self::in_any_value_of_ty(cx, constant.ty)
                     }
                 } else {
                     false
@@ -318,7 +318,7 @@ trait Qualif: QualifIdx {
         return_ty: Ty<'tcx>,
     ) -> bool {
         // Be conservative about the returned value of a const fn.
-        Self::in_any_value_of_ty(cx, return_ty).unwrap_or(false)
+        Self::in_any_const_safe_value_of_ty(cx, return_ty)
     }
 
     fn in_value(cx: &ConstCx<'_, 'tcx>, source: ValueSource<'_, 'tcx>) -> bool {
@@ -340,8 +340,8 @@ trait Qualif: QualifIdx {
 struct HasMutInterior;
 
 impl Qualif for HasMutInterior {
-    fn in_any_value_of_ty(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> Option<bool> {
-        Some(!ty.is_freeze(cx.tcx, cx.param_env, DUMMY_SP))
+    fn in_any_value_of_ty(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> bool {
+        !ty.is_freeze(cx.tcx, cx.param_env, DUMMY_SP)
     }
 
     fn in_rvalue(cx: &ConstCx<'_, 'tcx>, rvalue: &Rvalue<'tcx>) -> bool {
@@ -379,7 +379,7 @@ impl Qualif for HasMutInterior {
                 if let AggregateKind::Adt(def, ..) = **kind {
                     if Some(def.did) == cx.tcx.lang_items().unsafe_cell_type() {
                         let ty = rvalue.ty(cx.body, cx.tcx);
-                        assert_eq!(Self::in_any_value_of_ty(cx, ty), Some(true));
+                        assert!(Self::in_any_value_of_ty(cx, ty));
                         return true;
                     }
                 }
@@ -399,8 +399,8 @@ impl Qualif for HasMutInterior {
 struct NeedsDrop;
 
 impl Qualif for NeedsDrop {
-    fn in_any_value_of_ty(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> Option<bool> {
-        Some(ty.needs_drop(cx.tcx, cx.param_env))
+    fn in_any_value_of_ty(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> bool {
+        ty.needs_drop(cx.tcx, cx.param_env)
     }
 
     fn in_rvalue(cx: &ConstCx<'_, 'tcx>, rvalue: &Rvalue<'tcx>) -> bool {
@@ -425,6 +425,10 @@ impl Qualif for NeedsDrop {
 struct IsNotPromotable;
 
 impl Qualif for IsNotPromotable {
+    fn in_any_const_safe_value_of_ty(_cx: &ConstCx<'_, 'tcx>, _ty: Ty<'tcx>) -> bool {
+        false
+    }
+
     fn in_static(cx: &ConstCx<'_, 'tcx>, static_: &Static<'tcx>) -> bool {
         match static_.kind {
             StaticKind::Promoted(_) => unreachable!(),
@@ -575,6 +579,10 @@ impl Qualif for IsNotPromotable {
 struct IsNotImplicitlyPromotable;
 
 impl Qualif for IsNotImplicitlyPromotable {
+    fn in_any_const_safe_value_of_ty(_cx: &ConstCx<'_, 'tcx>, _ty: Ty<'tcx>) -> bool {
+        false
+    }
+
     fn in_call(
         cx: &ConstCx<'_, 'tcx>,
         callee: &Operand<'tcx>,
@@ -615,13 +623,13 @@ define_qualif_indices!(
 static_assert!(QUALIF_COUNT == 4);
 
 impl ConstCx<'_, 'tcx> {
-    fn qualifs_in_any_value_of_ty(&self, ty: Ty<'tcx>) -> PerQualif<bool> {
+    fn qualifs_in_any_const_safe_value_of_ty(&self, ty: Ty<'tcx>) -> PerQualif<bool> {
         let mut qualifs = PerQualif::default();
-        qualifs[HasMutInterior] = HasMutInterior::in_any_value_of_ty(self, ty).unwrap_or(false);
-        qualifs[NeedsDrop] = NeedsDrop::in_any_value_of_ty(self, ty).unwrap_or(false);
-        qualifs[IsNotPromotable] = IsNotPromotable::in_any_value_of_ty(self, ty).unwrap_or(false);
+        qualifs[HasMutInterior] = HasMutInterior::in_any_const_safe_value_of_ty(self, ty);
+        qualifs[NeedsDrop] = NeedsDrop::in_any_const_safe_value_of_ty(self, ty);
+        qualifs[IsNotPromotable] = IsNotPromotable::in_any_const_safe_value_of_ty(self, ty);
         qualifs[IsNotImplicitlyPromotable] =
-            IsNotImplicitlyPromotable::in_any_value_of_ty(self, ty).unwrap_or(false);
+            IsNotImplicitlyPromotable::in_any_const_safe_value_of_ty(self, ty);
         qualifs
     }
 
@@ -696,7 +704,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 
         for (local, decl) in body.local_decls.iter_enumerated() {
             if let LocalKind::Arg = body.local_kind(local) {
-                let qualifs = cx.qualifs_in_any_value_of_ty(decl.ty);
+                let qualifs = cx.qualifs_in_any_const_safe_value_of_ty(decl.ty);
                 for (per_local, qualif) in &mut cx.per_local.as_mut().zip(qualifs).0 {
                     if *qualif {
                         per_local.insert(local);
@@ -1004,7 +1012,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         // Account for errors in consts by using the
         // conservative type qualification instead.
         if qualifs[IsNotPromotable] {
-            qualifs = self.qualifs_in_any_value_of_ty(body.return_ty());
+            qualifs = self.qualifs_in_any_const_safe_value_of_ty(body.return_ty());
         }
 
         (qualifs.encode_to_bits(), self.tcx.arena.alloc(promoted_temps))
