@@ -26,7 +26,7 @@ use syntax::symbol::sym;
 use syntax_pos::{Span, DUMMY_SP};
 
 use std::fmt;
-use std::ops::{Deref, Index, IndexMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::usize;
 
 use crate::transform::{MirPass, MirSource};
@@ -126,8 +126,6 @@ struct ConstCx<'a, 'tcx> {
     param_env: ty::ParamEnv<'tcx>,
     mode: Mode,
     body: &'a Body<'tcx>,
-
-    per_local: PerQualif<BitSet<Local>>,
 }
 
 impl<'a, 'tcx> ConstCx<'a, 'tcx> {
@@ -171,22 +169,26 @@ trait Qualif: QualifIdx {
         Self::in_any_value_of_ty(cx, ty)
     }
 
-    fn in_local(cx: &ConstCx<'_, '_>, local: Local) -> bool {
-        cx.per_local.0[Self::IDX].contains(local)
+    fn in_local(_cx: &ConstCx<'_, '_>, per_local: &QualifsPerLocal, local: Local) -> bool {
+        per_local.0[Self::IDX].contains(local)
     }
 
-    fn in_static(_cx: &ConstCx<'_, 'tcx>, _static: &Static<'tcx>) -> bool {
+    fn in_static(
+        _cx: &ConstCx<'_, 'tcx>,
+        _static: &Static<'tcx>,
+    ) -> bool {
         // FIXME(eddyb) should we do anything here for value properties?
         false
     }
 
     fn in_projection_structurally(
         cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
         place: PlaceRef<'_, 'tcx>,
     ) -> bool {
         let proj = place.projection.as_ref().unwrap();
 
-        let base_qualif = Self::in_place(cx, PlaceRef {
+        let base_qualif = Self::in_place(cx, per_local, PlaceRef {
             base: place.base,
             projection: &proj.base,
         });
@@ -203,23 +205,28 @@ trait Qualif: QualifIdx {
             ProjectionElem::ConstantIndex { .. } |
             ProjectionElem::Downcast(..) => qualif,
 
-            ProjectionElem::Index(local) => qualif || Self::in_local(cx, local),
+            ProjectionElem::Index(local) => qualif || Self::in_local(cx, per_local, local),
         }
     }
 
     fn in_projection(
         cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
         place: PlaceRef<'_, 'tcx>,
     ) -> bool {
-        Self::in_projection_structurally(cx, place)
+        Self::in_projection_structurally(cx, per_local, place)
     }
 
-    fn in_place(cx: &ConstCx<'_, 'tcx>, place: PlaceRef<'_, 'tcx>) -> bool {
+    fn in_place(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        place: PlaceRef<'_, 'tcx>,
+    ) -> bool {
         match place {
             PlaceRef {
                 base: PlaceBase::Local(local),
                 projection: None,
-            } => Self::in_local(cx, *local),
+            } => Self::in_local(cx, per_local, *local),
             PlaceRef {
                 base: PlaceBase::Static(box Static {
                     kind: StaticKind::Promoted(_),
@@ -236,14 +243,18 @@ trait Qualif: QualifIdx {
             PlaceRef {
                 base: _,
                 projection: Some(_),
-            } => Self::in_projection(cx, place),
+            } => Self::in_projection(cx, per_local, place),
         }
     }
 
-    fn in_operand(cx: &ConstCx<'_, 'tcx>, operand: &Operand<'tcx>) -> bool {
+    fn in_operand(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        operand: &Operand<'tcx>,
+    ) -> bool {
         match *operand {
             Operand::Copy(ref place) |
-            Operand::Move(ref place) => Self::in_place(cx, place.as_ref()),
+            Operand::Move(ref place) => Self::in_place(cx, per_local, place.as_ref()),
 
             Operand::Constant(ref constant) => {
                 if let ConstValue::Unevaluated(def_id, _) = constant.literal.val {
@@ -267,21 +278,25 @@ trait Qualif: QualifIdx {
         }
     }
 
-    fn in_rvalue_structurally(cx: &ConstCx<'_, 'tcx>, rvalue: &Rvalue<'tcx>) -> bool {
+    fn in_rvalue_structurally(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        rvalue: &Rvalue<'tcx>,
+    ) -> bool {
         match *rvalue {
             Rvalue::NullaryOp(..) => false,
 
             Rvalue::Discriminant(ref place) |
-            Rvalue::Len(ref place) => Self::in_place(cx, place.as_ref()),
+            Rvalue::Len(ref place) => Self::in_place(cx, per_local, place.as_ref()),
 
             Rvalue::Use(ref operand) |
             Rvalue::Repeat(ref operand, _) |
             Rvalue::UnaryOp(_, ref operand) |
-            Rvalue::Cast(_, ref operand, _) => Self::in_operand(cx, operand),
+            Rvalue::Cast(_, ref operand, _) => Self::in_operand(cx, per_local, operand),
 
             Rvalue::BinaryOp(_, ref lhs, ref rhs) |
             Rvalue::CheckedBinaryOp(_, ref lhs, ref rhs) => {
-                Self::in_operand(cx, lhs) || Self::in_operand(cx, rhs)
+                Self::in_operand(cx, per_local, lhs) || Self::in_operand(cx, per_local, rhs)
             }
 
             Rvalue::Ref(_, _, ref place) => {
@@ -290,7 +305,7 @@ trait Qualif: QualifIdx {
                     if let ProjectionElem::Deref = proj.elem {
                         let base_ty = Place::ty_from(&place.base, &proj.base, cx.body, cx.tcx).ty;
                         if let ty::Ref(..) = base_ty.sty {
-                            return Self::in_place(cx, PlaceRef {
+                            return Self::in_place(cx, per_local, PlaceRef {
                                 base: &place.base,
                                 projection: &proj.base,
                             });
@@ -298,21 +313,26 @@ trait Qualif: QualifIdx {
                     }
                 }
 
-                Self::in_place(cx, place.as_ref())
+                Self::in_place(cx, per_local, place.as_ref())
             }
 
             Rvalue::Aggregate(_, ref operands) => {
-                operands.iter().any(|o| Self::in_operand(cx, o))
+                operands.iter().any(|o| Self::in_operand(cx, per_local, o))
             }
         }
     }
 
-    fn in_rvalue(cx: &ConstCx<'_, 'tcx>, rvalue: &Rvalue<'tcx>) -> bool {
-        Self::in_rvalue_structurally(cx, rvalue)
+    fn in_rvalue(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        rvalue: &Rvalue<'tcx>,
+    ) -> bool {
+        Self::in_rvalue_structurally(cx, per_local, rvalue)
     }
 
     fn in_call(
         cx: &ConstCx<'_, 'tcx>,
+        _per_local: &QualifsPerLocal,
         _callee: &Operand<'tcx>,
         _args: &[Operand<'tcx>],
         return_ty: Ty<'tcx>,
@@ -321,12 +341,16 @@ trait Qualif: QualifIdx {
         Self::in_any_const_safe_value_of_ty(cx, return_ty)
     }
 
-    fn in_value(cx: &ConstCx<'_, 'tcx>, source: ValueSource<'_, 'tcx>) -> bool {
+    fn in_value(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        source: ValueSource<'_, 'tcx>,
+    ) -> bool {
         match source {
-            ValueSource::Rvalue(rvalue) => Self::in_rvalue(cx, rvalue),
-            ValueSource::DropAndReplace(source) => Self::in_operand(cx, source),
+            ValueSource::Rvalue(rvalue) => Self::in_rvalue(cx, per_local, rvalue),
+            ValueSource::DropAndReplace(source) => Self::in_operand(cx, per_local, source),
             ValueSource::Call { callee, args, return_ty } => {
-                Self::in_call(cx, callee, args, return_ty)
+                Self::in_call(cx, per_local, callee, args, return_ty)
             }
         }
     }
@@ -344,7 +368,11 @@ impl Qualif for HasMutInterior {
         !ty.is_freeze(cx.tcx, cx.param_env, DUMMY_SP)
     }
 
-    fn in_rvalue(cx: &ConstCx<'_, 'tcx>, rvalue: &Rvalue<'tcx>) -> bool {
+    fn in_rvalue(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        rvalue: &Rvalue<'tcx>,
+    ) -> bool {
         match *rvalue {
             // Returning `true` for `Rvalue::Ref` indicates the borrow isn't
             // allowed in constants (and the `Checker` will error), and/or it
@@ -388,7 +416,7 @@ impl Qualif for HasMutInterior {
             _ => {}
         }
 
-        Self::in_rvalue_structurally(cx, rvalue)
+        Self::in_rvalue_structurally(cx, per_local, rvalue)
     }
 }
 
@@ -403,7 +431,11 @@ impl Qualif for NeedsDrop {
         ty.needs_drop(cx.tcx, cx.param_env)
     }
 
-    fn in_rvalue(cx: &ConstCx<'_, 'tcx>, rvalue: &Rvalue<'tcx>) -> bool {
+    fn in_rvalue(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        rvalue: &Rvalue<'tcx>,
+    ) -> bool {
         if let Rvalue::Aggregate(ref kind, _) = *rvalue {
             if let AggregateKind::Adt(def, ..) = **kind {
                 if def.has_dtor(cx.tcx) {
@@ -412,7 +444,7 @@ impl Qualif for NeedsDrop {
             }
         }
 
-        Self::in_rvalue_structurally(cx, rvalue)
+        Self::in_rvalue_structurally(cx, per_local, rvalue)
     }
 }
 
@@ -429,7 +461,10 @@ impl Qualif for IsNotPromotable {
         false
     }
 
-    fn in_static(cx: &ConstCx<'_, 'tcx>, static_: &Static<'tcx>) -> bool {
+    fn in_static(
+        cx: &ConstCx<'_, 'tcx>,
+        static_: &Static<'tcx>,
+    ) -> bool {
         match static_.kind {
             StaticKind::Promoted(_) => unreachable!(),
             StaticKind::Static(def_id) => {
@@ -446,6 +481,7 @@ impl Qualif for IsNotPromotable {
 
     fn in_projection(
         cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
         place: PlaceRef<'_, 'tcx>,
     ) -> bool {
         let proj = place.projection.as_ref().unwrap();
@@ -471,10 +507,14 @@ impl Qualif for IsNotPromotable {
             }
         }
 
-        Self::in_projection_structurally(cx, place)
+        Self::in_projection_structurally(cx, per_local, place)
     }
 
-    fn in_rvalue(cx: &ConstCx<'_, 'tcx>, rvalue: &Rvalue<'tcx>) -> bool {
+    fn in_rvalue(
+        cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
+        rvalue: &Rvalue<'tcx>,
+    ) -> bool {
         match *rvalue {
             Rvalue::Cast(CastKind::Misc, ref operand, cast_ty) if cx.mode == Mode::NonConstFn => {
                 let operand_ty = operand.ty(cx.body, cx.tcx);
@@ -507,11 +547,12 @@ impl Qualif for IsNotPromotable {
             _ => {}
         }
 
-        Self::in_rvalue_structurally(cx, rvalue)
+        Self::in_rvalue_structurally(cx, per_local, rvalue)
     }
 
     fn in_call(
         cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
         callee: &Operand<'tcx>,
         args: &[Operand<'tcx>],
         _return_ty: Ty<'tcx>,
@@ -567,7 +608,8 @@ impl Qualif for IsNotPromotable {
             _ => return true,
         }
 
-        Self::in_operand(cx, callee) || args.iter().any(|arg| Self::in_operand(cx, arg))
+        Self::in_operand(cx, per_local, callee)
+            || args.iter().any(|arg| Self::in_operand(cx, per_local, arg))
     }
 }
 
@@ -585,6 +627,7 @@ impl Qualif for IsNotImplicitlyPromotable {
 
     fn in_call(
         cx: &ConstCx<'_, 'tcx>,
+        per_local: &QualifsPerLocal,
         callee: &Operand<'tcx>,
         args: &[Operand<'tcx>],
         _return_ty: Ty<'tcx>,
@@ -599,7 +642,8 @@ impl Qualif for IsNotImplicitlyPromotable {
             }
         }
 
-        Self::in_operand(cx, callee) || args.iter().any(|arg| Self::in_operand(cx, arg))
+        Self::in_operand(cx, per_local, callee)
+            || args.iter().any(|arg| Self::in_operand(cx, per_local, arg))
     }
 }
 
@@ -635,6 +679,54 @@ macro_rules! collect_qualifs {
     }
 }
 
+struct QualifsPerLocal {
+    per_local: PerQualif<BitSet<Local>>,
+}
+
+impl Deref for QualifsPerLocal {
+    type Target = PerQualif<BitSet<Local>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.per_local
+    }
+}
+
+impl DerefMut for QualifsPerLocal {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.per_local
+    }
+}
+
+impl QualifsPerLocal {
+    fn new(cx: &ConstCx<'_, '_>, temps: &IndexVec<Local, TempState>) -> Self {
+        let mut ret = PerQualif::new(BitSet::new_empty(cx.body.local_decls.len()));
+
+        for (local, decl) in cx.body.local_decls.iter_enumerated() {
+            if let LocalKind::Arg = cx.body.local_kind(local) {
+                let qualifs = collect_qualifs!(Q::in_any_const_safe_value_of_ty(cx, decl.ty));
+                for (per_local, qualif) in &mut ret.as_mut().zip(qualifs).0 {
+                    if *qualif {
+                        per_local.insert(local);
+                    }
+                }
+            }
+            if !temps[local].is_promotable() {
+                ret[IsNotPromotable].insert(local);
+            }
+            if let LocalKind::Var = cx.body.local_kind(local) {
+                // Sanity check to prevent implicit and explicit promotion of
+                // named locals
+                assert!(ret[IsNotPromotable].contains(local));
+            }
+        }
+
+        QualifsPerLocal {
+            per_local: ret,
+        }
+    }
+}
+
+
 /// Checks MIR for being admissible as a compile-time constant, using `ConstCx`
 /// for value qualifications, and accumulates writes of
 /// rvalue/call results to locals, in `local_qualif`.
@@ -642,6 +734,7 @@ macro_rules! collect_qualifs {
 /// both in functions and const/static items.
 struct Checker<'a, 'tcx> {
     cx: ConstCx<'a, 'tcx>,
+    per_local: QualifsPerLocal,
 
     span: Span,
     def_id: DefId,
@@ -677,35 +770,18 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 
         let param_env = tcx.param_env(def_id);
 
-        let mut cx = ConstCx {
+        let cx = ConstCx {
             tcx,
             param_env,
             mode,
             body,
-            per_local: PerQualif::new(BitSet::new_empty(body.local_decls.len())),
         };
 
-        for (local, decl) in body.local_decls.iter_enumerated() {
-            if let LocalKind::Arg = body.local_kind(local) {
-                let qualifs = collect_qualifs!(Q::in_any_const_safe_value_of_ty(&cx, decl.ty));
-                for (per_local, qualif) in &mut cx.per_local.as_mut().zip(qualifs).0 {
-                    if *qualif {
-                        per_local.insert(local);
-                    }
-                }
-            }
-            if !temps[local].is_promotable() {
-                cx.per_local[IsNotPromotable].insert(local);
-            }
-            if let LocalKind::Var = body.local_kind(local) {
-                // Sanity check to prevent implicit and explicit promotion of
-                // named locals
-                assert!(cx.per_local[IsNotPromotable].contains(local));
-            }
-        }
+        let per_local = QualifsPerLocal::new(&cx, &temps);
 
         Checker {
             cx,
+            per_local,
             span: body.span,
             def_id,
             rpo,
@@ -741,7 +817,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
     fn assign(&mut self, dest: &Place<'tcx>, source: ValueSource<'_, 'tcx>, location: Location) {
         trace!("assign: {:?} <- {:?}", dest, source);
 
-        let mut qualifs = collect_qualifs!(Q::in_value(self, source));
+        let mut qualifs = collect_qualifs!(Q::in_value(&self.cx, &self.per_local, source));
 
         match source {
             ValueSource::Rvalue(&Rvalue::Ref(_, kind, ref place)) => {
@@ -813,7 +889,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                             // This allows borrowing fields which don't have
                             // `HasMutInterior`, from a type that does, e.g.:
                             // `let _: &'static _ = &(Cell::new(1), 2).1;`
-                            let mut local_qualifs = collect_qualifs!(Q::in_local(self, *local));
+                            let mut local_qualifs = collect_qualifs!(Q::in_local(&self.cx, &self.per_local, *local));
                             // Any qualifications, except HasMutInterior (see above), disqualify
                             // from promotion.
                             // This is, in particular, the "implicit promotion" version of
@@ -829,8 +905,8 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             },
             ValueSource::Rvalue(&Rvalue::Repeat(ref operand, _)) => {
                 let candidate = Candidate::Repeat(location);
-                let not_promotable = IsNotImplicitlyPromotable::in_operand(self, operand) ||
-                                     IsNotPromotable::in_operand(self, operand);
+                let not_promotable = IsNotImplicitlyPromotable::in_operand(&self.cx, &self.per_local, operand) ||
+                                     IsNotPromotable::in_operand(&self.cx, &self.per_local, operand);
                 debug!("assign: self.def_id={:?} operand={:?}", self.def_id, operand);
                 if !not_promotable && self.tcx.features().const_in_array_repeat_expressions {
                     debug!("assign: candidate={:?}", candidate);
@@ -885,7 +961,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         // While we could special case full assignments, this would be inconsistent with
         // aggregates where we overwrite all fields via assignments, which would not get
         // that feature.
-        for (per_local, qualif) in &mut self.cx.per_local.as_mut().zip(qualifs).0 {
+        for (per_local, qualif) in &mut self.per_local.as_mut().zip(qualifs).0 {
             if *qualif {
                 per_local.insert(index);
             }
@@ -899,7 +975,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         // be replaced with calling `insert` to re-set the bit).
         if kind == LocalKind::Temp {
             if !self.temp_promotion_state[index].is_promotable() {
-                assert!(self.cx.per_local[IsNotPromotable].contains(index));
+                assert!(self.per_local[IsNotPromotable].contains(index));
             }
         }
     }
@@ -990,7 +1066,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             }
         }
 
-        let mut qualifs = collect_qualifs!(Q::in_local(self, RETURN_PLACE));
+        let mut qualifs = collect_qualifs!(Q::in_local(&self.cx, &self.per_local, RETURN_PLACE));
 
         // Account for errors in consts by using the
         // conservative type qualification instead.
@@ -1146,7 +1222,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                     base: PlaceBase::Local(local),
                     projection: None,
                 } = *place {
-                    self.cx.per_local[NeedsDrop].remove(local);
+                    self.per_local[NeedsDrop].remove(local);
                 }
             }
             Operand::Copy(_) |
@@ -1421,7 +1497,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                     // which happens even without the user requesting it.
                     // We can error out with a hard error if the argument is not
                     // constant here.
-                    if !IsNotPromotable::in_operand(self, arg) {
+                    if !IsNotPromotable::in_operand(&self.cx, &self.per_local, arg) {
                         debug!("visit_terminator_kind: candidate={:?}", candidate);
                         self.promotion_candidates.push(candidate);
                     } else {
@@ -1461,7 +1537,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                     base: PlaceBase::Local(local),
                     projection: None,
                 } = *place {
-                    if NeedsDrop::in_local(self, local) {
+                    if NeedsDrop::in_local(&self.cx, &self.per_local, local) {
                         Some(self.body.local_decls[local].source_info.span)
                     } else {
                         None
