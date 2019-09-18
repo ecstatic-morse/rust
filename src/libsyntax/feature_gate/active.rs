@@ -522,6 +522,9 @@ declare_features! (
     /// Allows the use of or-patterns (e.g., `0 | 1`).
     (active, or_patterns, "1.38.0", Some(54883), None),
 
+    /// Allows the use of `if` and `match` in constants.
+    (active, const_if_match, "1.39.0", Some(49146), None),
+
     // -------------------------------------------------------------------------
     // feature-group-end: actual feature gates
     // -------------------------------------------------------------------------
