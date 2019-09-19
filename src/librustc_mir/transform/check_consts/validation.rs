@@ -92,8 +92,8 @@ impl fmt::Display for Mode {
 }
 
 pub struct Qualifs<'a, 'mir, 'tcx> {
-    has_mut_interior: FlowSensitiveResolver<'a, 'mir, 'tcx, HasMutInterior>,
-    needs_drop: FlowSensitiveResolver<'a, 'mir, 'tcx, NeedsDrop>,
+    pub has_mut_interior: FlowSensitiveResolver<'a, 'mir, 'tcx, HasMutInterior>,
+    pub needs_drop: FlowSensitiveResolver<'a, 'mir, 'tcx, NeedsDrop>,
 }
 
 pub struct Validator<'a, 'mir, 'tcx> {

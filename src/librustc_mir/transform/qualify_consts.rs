@@ -943,25 +943,55 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         }
     }
 
+    fn collect_promotables_for_const(&self) -> BitSet<Local> {
+        // Collect all the temps we need to promote.
+        let mut promoted_temps = BitSet::new_empty(self.temp_promotion_state.len());
+
+        debug!("qualify_const: promotion_candidates={:?}", self.promotion_candidates);
+        for candidate in &self.promotion_candidates {
+            match *candidate {
+                Candidate::Repeat(Location { block: bb, statement_index: stmt_idx }) => {
+                    if let StatementKind::Assign(box(_, Rvalue::Repeat(
+                        Operand::Move(Place {
+                            base: PlaceBase::Local(index),
+                            projection: box [],
+                        }),
+                        _
+                    ))) = self.body[bb].statements[stmt_idx].kind {
+                        promoted_temps.insert(index);
+                    }
+                }
+                Candidate::Ref(Location { block: bb, statement_index: stmt_idx }) => {
+                    if let StatementKind::Assign(
+                        box(
+                            _,
+                            Rvalue::Ref(_, _, Place {
+                                base: PlaceBase::Local(index),
+                                projection: box [],
+                            })
+                        )
+                    ) = self.body[bb].statements[stmt_idx].kind {
+                        promoted_temps.insert(index);
+                    }
+                }
+                Candidate::Argument { .. } => {}
+            }
+        }
+
+        promoted_temps
+    }
+
     /// Check a whole const, static initializer or const fn.
     fn check_const(&mut self) -> (u8, &'tcx BitSet<Local>) {
-        use crate::transform::check_consts as new_checker;
+        use crate::transform::check_consts as new;
 
         debug!("const-checking {} {:?}", self.mode, self.def_id);
 
-        // FIXME: Also use the new validator when features that require it (e.g. `const_if`) are
-        // enabled.
-        let use_new_validator = self.tcx.sess.opts.debugging_opts.unleash_the_miri_inside_of_you;
-        if use_new_validator {
-            debug!("Using dataflow-based const validator");
-        }
-
-        let item = new_checker::Item::new(self.tcx, self.def_id, self.body);
+        // Run the new validator but silence its errors so that we can compare results.
+        let item = new::Item::new(self.tcx, self.def_id, self.body);
         let mut_borrowed_locals = new_checker::validation::compute_indirectly_mutable_locals(&item);
-        let mut validator = new_checker::validation::Validator::new(&item, &mut_borrowed_locals);
-
-        validator.suppress_errors = !use_new_validator;
-        self.suppress_errors = use_new_validator;
+        let mut validator = new::validation::Validator::new(&item, &mut_borrowed_locals);
+        validator.suppress_errors = true;
 
         let body = self.body;
 
@@ -1086,6 +1116,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             qualifs = self.qualifs_in_any_value_of_ty(body.return_ty());
         }
 
+        let promoted_temps = self.collect_promotables_for_const();
         (qualifs.encode_to_bits(), self.tcx.arena.alloc(promoted_temps))
     }
 }
@@ -1659,6 +1690,8 @@ pub fn provide(providers: &mut Providers<'_>) {
 }
 
 fn mir_const_qualif(tcx: TyCtxt<'_>, def_id: DefId) -> (u8, &BitSet<Local>) {
+    use crate::transform::check_consts as new;
+
     // N.B., this `borrow()` is guaranteed to be valid (i.e., the value
     // cannot yet be stolen), because `mir_validated()`, which steals
     // from `mir_const(), forces this query to execute before
@@ -1670,7 +1703,39 @@ fn mir_const_qualif(tcx: TyCtxt<'_>, def_id: DefId) -> (u8, &BitSet<Local>) {
         return (1 << IsNotPromotable::IDX, tcx.arena.alloc(BitSet::new_empty(0)));
     }
 
-    Checker::new(tcx, def_id, body, Mode::Const).check_const()
+    let use_new_validator = tcx.features().const_if_match
+        || tcx.sess.opts.debugging_opts.unleash_the_miri_inside_of_you;
+
+    if use_new_validator {
+        debug!("Using dataflow-based const validator");
+
+        // Use the old `Checker` to do promotion, but turn off validation errors.
+        let hir_id = tcx.hir().as_local_hir_id(def_id).unwrap();
+        let mode = determine_mode(tcx, hir_id, def_id);
+        let mut promoter = Checker::new(tcx, def_id, body, mode);
+        promoter.suppress_errors = true;
+
+        let item = new::Item::new(tcx, def_id, body);
+        let mut validator = new::validation::Validator::new(&item);
+
+        while let Some((bb, data)) = promoter.rpo.next() {
+            promoter.visit_basic_block_data(bb, data);
+        }
+
+        validator.visit_body(body);
+
+        let mut qualifs = validator.into_qualifs();
+
+        // FIXME: if the return place is not promotable, we need to set all other qualifs.
+        let needs_drop = qualifs.needs_drop.contains(RETURN_PLACE);
+        let has_mut_interior = qualifs.has_mut_interior.contains(RETURN_PLACE);
+
+        let qualifs = (needs_drop as u8) | ((has_mut_interior as u8) << 1);
+        let promoted = promoter.collect_promotables_for_const();
+        (qualifs, tcx.arena.alloc(promoted))
+    } else {
+        Checker::new(tcx, def_id, body, Mode::Const).check_const()
+    }
 }
 
 pub struct QualifyAndPromoteConstants<'tcx> {
@@ -1687,6 +1752,8 @@ impl<'tcx> Default for QualifyAndPromoteConstants<'tcx> {
 
 impl<'tcx> MirPass<'tcx> for QualifyAndPromoteConstants<'tcx> {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, src: MirSource<'tcx>, body: &mut Body<'tcx>) {
+        use crate::transform::check_consts as new;
+
         // There's not really any point in promoting errorful MIR.
         if body.return_ty().references_error() {
             tcx.sess.delay_span_bug(body.span, "QualifyAndPromoteConstants: MIR had errors");
@@ -1703,7 +1770,56 @@ impl<'tcx> MirPass<'tcx> for QualifyAndPromoteConstants<'tcx> {
         let mode = determine_mode(tcx, hir_id, def_id);
 
         debug!("run_pass: mode={:?}", mode);
-        if let Mode::NonConstFn | Mode::ConstFn = mode {
+
+        let use_new_validator = tcx.features().const_if_match
+            || tcx.sess.opts.debugging_opts.unleash_the_miri_inside_of_you;
+
+        if mode.requires_const_checking() && use_new_validator {
+            debug!("Using dataflow-based const validator");
+
+            // Use the old `Checker` to do promotion, but turn off validation errors.
+            let mut promoter = Checker::new(tcx, def_id, body, mode);
+            promoter.suppress_errors = true;
+
+            let item = new::Item::new(tcx, def_id, body);
+            let mut validator = new::validation::Validator::new(&item);
+
+            while let Some((bb, data)) = promoter.rpo.next() {
+                promoter.visit_basic_block_data(bb, data);
+            }
+
+            validator.visit_body(body);
+
+            match mode {
+                Mode::NonConstFn | Mode::ConstFn => {
+                    let Checker {
+                        temp_promotion_state,
+                        promotion_candidates,
+                        ..
+                    } = promoter;
+
+                    let promoted = promote_consts::promote_candidates(
+                        def_id,
+                        body,
+                        tcx,
+                        temp_promotion_state,
+                        promotion_candidates,
+                    );
+                    self.promoted.set(promoted);
+                }
+
+                Mode::Const => {
+                    let promoted = tcx.mir_const_qualif(def_id).1;
+                    remove_drop_and_storage_dead_on_promoted_locals(body, &promoted);
+                }
+
+                Mode::Static | Mode::StaticMut => {
+                    let promoted = promoter.collect_promotables_for_const();
+                    remove_drop_and_storage_dead_on_promoted_locals(body, &promoted);
+                }
+            }
+
+        } else if let Mode::NonConstFn | Mode::ConstFn = mode {
             // This is ugly because Checker holds onto mir,
             // which can't be mutated until its scope ends.
             let (temps, candidates) = {
