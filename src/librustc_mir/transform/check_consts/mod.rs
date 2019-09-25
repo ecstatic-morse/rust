@@ -12,7 +12,7 @@ pub use self::qualifs::Qualif;
 
 pub mod ops;
 mod qualifs;
-mod resolver;
+pub mod resolver;
 pub mod validation;
 
 /// Information about the item currently being validated, as well as a reference to the global

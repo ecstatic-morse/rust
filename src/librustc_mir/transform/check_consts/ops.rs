@@ -137,7 +137,11 @@ impl NonConstOp for HeapAllocation {
 
 #[derive(Debug)]
 pub struct IfOrMatch;
-impl NonConstOp for IfOrMatch {}
+impl NonConstOp for IfOrMatch {
+    fn feature_gate(tcx: TyCtxt<'_>) -> Option<bool> {
+        Some(tcx.features().const_if_match)
+    }
+}
 
 #[derive(Debug)]
 pub struct LiveDrop;

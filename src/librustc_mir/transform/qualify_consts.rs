@@ -34,6 +34,7 @@ use std::usize;
 use rustc::hir::HirId;
 use crate::transform::{MirPass, MirSource};
 use super::promote_consts::{self, Candidate, TempState};
+use crate::transform::check_consts::resolver::QualifResolver;
 use crate::transform::check_consts::ops::{self, NonConstOp};
 
 /// What kind of item we are in.
@@ -1046,31 +1047,29 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 
         // The new validation pass should agree with the old when running on simple const bodies
         // (e.g. no `if` or `loop`).
-        if !use_new_validator {
-            let mut new_errors = validator.take_errors();
+        let mut new_errors = validator.take_errors();
 
-            // FIXME: each checker sometimes emits the same error with the same span twice in a row.
-            self.errors.dedup();
-            new_errors.dedup();
+        // FIXME: each checker sometimes emits the same error with the same span twice in a row.
+        self.errors.dedup();
+        new_errors.dedup();
 
-            if self.errors != new_errors {
-                error!("old validator: {:?}", self.errors);
-                error!("new validator: {:?}", new_errors);
+        if self.errors != new_errors {
+            error!("old validator: {:?}", self.errors);
+            error!("new validator: {:?}", new_errors);
 
-                // ICE on nightly if the validators do not emit exactly the same errors.
-                // Users can supress this panic with an unstable compiler flag (hopefully after
-                // filing an issue).
-                let opts = &self.tcx.sess.opts;
-                let trigger_ice = opts.unstable_features.is_nightly_build()
-                    && !opts.debugging_opts.suppress_const_validation_back_compat_ice;
+            // ICE on nightly if the validators do not emit exactly the same errors.
+            // Users can supress this panic with an unstable compiler flag (hopefully after
+            // filing an issue).
+            let opts = &self.tcx.sess.opts;
+            let trigger_ice = opts.unstable_features.is_nightly_build()
+                && !opts.debugging_opts.suppress_const_validation_back_compat_ice;
 
-                if trigger_ice {
-                    span_bug!(
-                        body.span,
-                        "{}",
-                        VALIDATOR_MISMATCH_ERR,
-                    );
-                }
+            if trigger_ice {
+                span_bug!(
+                    body.span,
+                    "{}",
+                    VALIDATOR_MISMATCH_ERR,
+                );
             }
         }
 
@@ -1726,10 +1725,14 @@ fn mir_const_qualif(tcx: TyCtxt<'_>, def_id: DefId) -> (u8, &BitSet<Local>) {
 
         let mut qualifs = validator.into_qualifs();
 
-        // FIXME: if the return place is not promotable, we need to set all other qualifs.
         let needs_drop = qualifs.needs_drop.contains(RETURN_PLACE);
         let has_mut_interior = qualifs.has_mut_interior.contains(RETURN_PLACE);
 
+        // No need to set the promotable qualifs here, since consts are always treated as
+        // promotable unless they are `NeedsDrop` or `HasMutInterior`. This remains true if they
+        // contain complex control flow.
+        //
+        // FIXME: Use QualifSet everywhere.
         let qualifs = (needs_drop as u8) | ((has_mut_interior as u8) << 1);
         let promoted = promoter.collect_promotables_for_const();
         (qualifs, tcx.arena.alloc(promoted))
