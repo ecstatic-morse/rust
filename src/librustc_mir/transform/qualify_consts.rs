@@ -990,7 +990,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 
         // Run the new validator but silence its errors so that we can compare results.
         let item = new::Item::new(self.tcx, self.def_id, self.body);
-        let mut_borrowed_locals = new_checker::validation::compute_indirectly_mutable_locals(&item);
+        let mut_borrowed_locals = new::validation::compute_indirectly_mutable_locals(&item);
         let mut validator = new::validation::Validator::new(&item, &mut_borrowed_locals);
         validator.suppress_errors = true;
 
@@ -1715,7 +1715,8 @@ fn mir_const_qualif(tcx: TyCtxt<'_>, def_id: DefId) -> (u8, &BitSet<Local>) {
         promoter.suppress_errors = true;
 
         let item = new::Item::new(tcx, def_id, body);
-        let mut validator = new::validation::Validator::new(&item);
+        let mut_borrowed_locals = new::validation::compute_indirectly_mutable_locals(&item);
+        let mut validator = new::validation::Validator::new(&item, &mut_borrowed_locals);
 
         while let Some((bb, data)) = promoter.rpo.next() {
             promoter.visit_basic_block_data(bb, data);
@@ -1785,7 +1786,8 @@ impl<'tcx> MirPass<'tcx> for QualifyAndPromoteConstants<'tcx> {
             promoter.suppress_errors = true;
 
             let item = new::Item::new(tcx, def_id, body);
-            let mut validator = new::validation::Validator::new(&item);
+            let mut_borrowed_locals = new::validation::compute_indirectly_mutable_locals(&item);
+            let mut validator = new::validation::Validator::new(&item, &mut_borrowed_locals);
 
             while let Some((bb, data)) = promoter.rpo.next() {
                 promoter.visit_basic_block_data(bb, data);
