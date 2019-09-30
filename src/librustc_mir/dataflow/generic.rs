@@ -18,12 +18,13 @@
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::{fs, io, ops};
 
 use rustc::hir::def_id::DefId;
 use rustc::mir::{self, traversal, BasicBlock, Location};
-use rustc::ty::TyCtxt;
+use rustc::ty::{self, TyCtxt};
 use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc_data_structures::work_queue::WorkQueue;
@@ -441,20 +442,21 @@ where
             );
         }
 
-        let results = Results {
-            analysis: self.analysis,
-            entry_sets: self.entry_sets,
-        };
+        let Engine {
+            tcx,
+            body,
+            def_id,
+            analysis,
+            entry_sets,
+            ..
+        } = self;
 
-        if let Some(path) = rustc_dataflow_graphviz_output_path(self.tcx, self.def_id) {
-            let path = dataflow_path(A::NAME, &path);
-            let graphviz = graphviz::Formatter::new(self.body, self.def_id, &results);
+        let results = Results { analysis, entry_sets };
 
-            let mut out = Vec::new();
-            dot::render(&graphviz, &mut out).unwrap();
-
-            debug!("printing dataflow results for {:?} to {}", self.def_id, path.display());
-            if let Err(e) = fs::write(&path, out) {
+        let attrs = tcx.get_attrs(def_id);
+        if let Some(path) = get_dataflow_graphviz_output_path(tcx, attrs, A::NAME) {
+            let result = write_dataflow_graphviz_results(body, def_id, &path, &results);
+            if let Err(e) = result {
                 warn!("Failed to write dataflow results to {}: {}", path.display(), e);
             }
         }
@@ -554,18 +556,15 @@ where
     }
 }
 
-fn dataflow_path(analysis: &str, path: &str) -> PathBuf {
-    let mut path = PathBuf::from(path);
-    let new_file_name = {
-        let orig_file_name = path.file_name().unwrap().to_str().unwrap();
-        format!("{}_{}", analysis, orig_file_name)
-    };
-    path.set_file_name(new_file_name);
-    path
-}
-
-fn rustc_dataflow_graphviz_output_path(tcx: TyCtxt<'_>, def_id: DefId) -> Option<String> {
-    let attrs = tcx.get_attrs(def_id);
+/// Looks for attributes like `#[rustc_mir(borrowck_graphviz_postflow="./path/to/suffix.dot")]` and
+/// extracts the path with the given analysis name prepended to the suffix.
+///
+/// Returns `None` if no such attribute exists.
+fn get_dataflow_graphviz_output_path(
+    tcx: TyCtxt<'tcx>,
+    attrs: ty::Attributes<'tcx>,
+    analysis: &str,
+) -> Option<PathBuf> {
     let mut rustc_mir_attrs = attrs
         .into_iter()
         .filter(|attr| attr.check_name(sym::rustc_mir))
@@ -574,13 +573,41 @@ fn rustc_dataflow_graphviz_output_path(tcx: TyCtxt<'_>, def_id: DefId) -> Option
     let borrowck_graphviz_postflow = rustc_mir_attrs
         .find(|attr| attr.check_name(sym::borrowck_graphviz_postflow))?;
 
-    let path = borrowck_graphviz_postflow.value_str();
-    if path.is_none() {
-        tcx.sess.span_err(
-            borrowck_graphviz_postflow.span(),
-            "borrowck_graphviz_postflow requires a path",
-        );
-    }
+    let path_and_suffix = match borrowck_graphviz_postflow.value_str() {
+        Some(p) => p,
+        None => {
+            tcx.sess.span_err(
+                borrowck_graphviz_postflow.span(),
+                "borrowck_graphviz_postflow requires a path",
+            );
 
-    path.map(|s| s.to_string())
+            return None;
+        }
+    };
+
+    // Change "path/suffix.dot" to "path/analysis_name_suffix.dot"
+    let mut ret = PathBuf::from(path_and_suffix.to_string());
+    let suffix = ret.file_name().unwrap();
+
+    let mut file_name: OsString = analysis.into();
+    file_name.push("_");
+    file_name.push(suffix);
+    ret.set_file_name(file_name);
+
+    Some(ret)
+}
+
+fn write_dataflow_graphviz_results<A: Analysis<'tcx>>(
+    body: &mir::Body<'tcx>,
+    def_id: DefId,
+    path: &Path,
+    results: &Results<'tcx, A>
+) -> io::Result<()> {
+    debug!("printing dataflow results for {:?} to {}", def_id, path.display());
+
+    let mut buf = Vec::new();
+    let graphviz = graphviz::Formatter::new(body, def_id, results);
+
+    dot::render(&graphviz, &mut buf)?;
+    fs::write(path, buf)
 }
