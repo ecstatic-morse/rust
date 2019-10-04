@@ -11,8 +11,8 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use crate::dataflow::{self as old_dataflow, generic as dataflow};
+use self::old_dataflow::impls::indirect_mutation::{self, IndirectlyMutableLocals};
 use super::{Item, Qualif};
-use self::old_dataflow::IndirectlyMutableLocals;
 
 /// A `Visitor` that propagates qualifs between locals. This defines the transfer function of
 /// `FlowSensitiveAnalysis` as well as the logic underlying `TempPromotionResolver`.
@@ -166,6 +166,98 @@ pub trait QualifResolver<Q> {
     /// Resets the resolver to the `START_BLOCK`. This allows a resolver to be reused
     /// for multiple passes over a `mir::Body`.
     fn reset(&mut self);
+}
+
+/// A `QualifResolver` that is only suitable for computing `Qualif`s to determine the promotability
+/// of temps.
+///
+/// Because promotable temporaries can only be assigned to exactly once, we can skip dataflow
+/// when propagating qualifs to determine temp promotability. Instead, we keep a single state
+/// bitset and update it as we traverse the MIR. These results will not be valid for variables that
+/// are assigned to more than once.
+pub struct TempPromotionResolver<'a, 'mir, 'tcx, Q> {
+    item: &'a Item<'mir, 'tcx>,
+    state: BitSet<Local>,
+    _qualif: PhantomData<Q>,
+}
+
+impl<Q> TempPromotionResolver<'a, 'mir, 'tcx, Q>
+where
+    Q: Qualif,
+{
+    #[allow(unused)]
+    pub fn new(item: &'a Item<'mir, 'tcx>) -> Self {
+        let mut ret = TempPromotionResolver {
+            item,
+            state: BitSet::new_empty(item.body.local_decls.len()),
+            _qualif: PhantomData,
+        };
+
+        ret.transfer_function().initialize_state();
+        ret
+    }
+
+    fn transfer_function(&mut self) -> TransferFunction<'_, 'mir, 'tcx, Q> {
+        TransferFunction::<Q>::new(self.item, &mut self.state)
+    }
+}
+
+impl<Q> Visitor<'tcx> for TempPromotionResolver<'a, 'mir, 'tcx, Q>
+where
+    Q: Qualif,
+{
+    fn visit_rvalue(&mut self, rvalue: &mir::Rvalue<'tcx>, _location: Location) {
+        // No need to recurse.
+        // self.super_rvalue(rvalue, location);
+
+        // A borrow of a `Local` that allows mutation causes that `Local` to become qualified.
+        if let mir::Rvalue::Ref(_, kind, ref borrowed_place) = *rvalue {
+            let borrowed_ty = borrowed_place.ty(self.item.body, self.item.tcx).ty;
+
+            if !Q::in_any_value_of_ty(self.item, borrowed_ty) {
+                return;
+            }
+
+            let allows_mutation = indirect_mutation::borrow_allows_mutation(
+                self.item.tcx,
+                self.item.param_env,
+                self.item.body,
+                borrowed_place,
+                kind,
+            );
+            if !allows_mutation {
+                return;
+            }
+
+            match borrowed_place.base {
+                mir::PlaceBase::Local(borrowed_local) if !borrowed_place.is_indirect() => {
+                    self.state.insert(borrowed_local);
+                }
+
+                _ => (),
+            }
+        }
+    }
+
+    fn visit_statement(&mut self, statement: &mir::Statement<'tcx>, location: Location) {
+        self.transfer_function().visit_statement(statement, location);
+        self.super_statement(statement, location);
+    }
+
+    fn visit_terminator(&mut self, terminator: &mir::Terminator<'tcx>, location: Location) {
+        self.transfer_function().visit_terminator(terminator, location);
+        self.super_terminator(terminator, location);
+    }
+}
+
+impl<Q> QualifResolver<Q> for TempPromotionResolver<'a, 'mir, 'tcx, Q> {
+    fn get(&mut self) -> &BitSet<Local> {
+        &self.state
+    }
+
+    fn reset(&mut self) {
+        self.state.clear();
+    }
 }
 
 pub type IndirectlyMutableResults<'mir, 'tcx> =
