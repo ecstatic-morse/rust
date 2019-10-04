@@ -19,7 +19,7 @@ use super::drop_flag_effects_for_location;
 use super::on_lookup_result_bits;
 
 mod borrowed_locals;
-mod indirect_mutation;
+pub(crate) mod indirect_mutation;
 mod storage_liveness;
 
 pub use self::borrowed_locals::*;

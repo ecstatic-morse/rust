@@ -33,7 +33,7 @@ mod at_location;
 pub mod drop_flag_effects;
 pub mod generic;
 mod graphviz;
-mod impls;
+pub(crate) mod impls;
 pub mod move_paths;
 
 pub(crate) mod indexes {

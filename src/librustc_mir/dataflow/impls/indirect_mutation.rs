@@ -97,36 +97,6 @@ struct TransferFunction<'a, 'mir, 'tcx> {
     param_env: ty::ParamEnv<'tcx>,
 }
 
-impl<'tcx> TransferFunction<'_, '_, 'tcx> {
-    /// Returns `true` if this borrow would allow mutation of the `borrowed_place`.
-    fn borrow_allows_mutation(
-        &self,
-        kind: mir::BorrowKind,
-        borrowed_place: &mir::Place<'tcx>,
-    ) -> bool {
-        let borrowed_ty = borrowed_place.ty(self.body, self.tcx).ty;
-
-        // Zero-sized types cannot be mutated, since there is nothing inside to mutate.
-        //
-        // FIXME: For now, we only exempt arrays of length zero. We need to carefully
-        // consider the effects before extending this to all ZSTs.
-        if let ty::Array(_, len) = borrowed_ty.kind {
-            if len.try_eval_usize(self.tcx, self.param_env) == Some(0) {
-                return false;
-            }
-        }
-
-        match kind {
-            mir::BorrowKind::Mut { .. } => true,
-
-            | mir::BorrowKind::Shared
-            | mir::BorrowKind::Shallow
-            | mir::BorrowKind::Unique
-            => !borrowed_ty.is_freeze(self.tcx, self.param_env, DUMMY_SP),
-        }
-    }
-}
-
 impl<'tcx> Visitor<'tcx> for TransferFunction<'_, '_, 'tcx> {
     fn visit_rvalue(
         &mut self,
@@ -134,7 +104,15 @@ impl<'tcx> Visitor<'tcx> for TransferFunction<'_, '_, 'tcx> {
         location: Location,
     ) {
         if let mir::Rvalue::Ref(_, kind, ref borrowed_place) = *rvalue {
-            if self.borrow_allows_mutation(kind, borrowed_place) {
+            let allows_mutation = borrow_allows_mutation(
+                self.tcx,
+                self.param_env,
+                self.body,
+                borrowed_place,
+                kind,
+            );
+
+            if allows_mutation {
                 match borrowed_place.base {
                     mir::PlaceBase::Local(borrowed_local) if !borrowed_place.is_indirect()
                         => self.trans.gen(borrowed_local),
@@ -160,5 +138,35 @@ impl<'tcx> Visitor<'tcx> for TransferFunction<'_, '_, 'tcx> {
             // Although drop terminators mutably borrow the location being dropped, that borrow
             // cannot live beyond the drop terminator because the dropped location is invalidated.
         }
+    }
+}
+
+/// Returns `true` if this borrow would allow mutation of the `borrowed_place`.
+pub fn borrow_allows_mutation(
+    tcx: TyCtxt<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
+    body: &mir::Body<'tcx>,
+    borrowed_place: &mir::Place<'tcx>,
+    kind: mir::BorrowKind,
+) -> bool {
+    let borrowed_ty = borrowed_place.ty(body, tcx).ty;
+
+    // Zero-sized types cannot be mutated, since there is nothing inside to mutate.
+    //
+    // FIXME: For now, we only exempt arrays of length zero. We need to carefully
+    // consider the effects before extending this to all ZSTs.
+    if let ty::Array(_, len) = borrowed_ty.kind {
+        if len.try_eval_usize(tcx, param_env) == Some(0) {
+            return false;
+        }
+    }
+
+    match kind {
+        mir::BorrowKind::Mut { .. } => true,
+
+        | mir::BorrowKind::Shared
+        | mir::BorrowKind::Shallow
+        | mir::BorrowKind::Unique
+        => !borrowed_ty.is_freeze(tcx, param_env, DUMMY_SP),
     }
 }
