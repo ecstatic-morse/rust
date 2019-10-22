@@ -19,7 +19,7 @@ use std::u32;
 use rustc_target::spec::abi::Abi;
 use syntax::attr::{self, UnwindAttr};
 use syntax::symbol::kw;
-use syntax_pos::Span;
+use syntax_pos::{BytePos, Span};
 
 use super::lints;
 
@@ -630,8 +630,20 @@ where
                 })
             },
         ));
-        // Attribute epilogue to function's closing brace
-        let fn_end = span.shrink_to_hi();
+
+        // Attribute epilogue to function's closing brace (if one exists).
+        let fn_end = if let hir::ExprKind::Block(block, _) = &body.value.kind {
+            let block_span = block.span;
+
+            block_span.hi()
+                .0
+                .checked_sub(1)
+                .map(|pos| block_span.with_lo(BytePos(pos)))
+                .unwrap_or(span.shrink_to_hi())
+        } else {
+            span.shrink_to_hi()
+        };
+
         let source_info = builder.source_info(fn_end);
         let return_block = builder.return_block();
         builder.cfg.terminate(block, source_info,
