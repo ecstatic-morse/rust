@@ -19,7 +19,7 @@ LL |     || doit(data);
    |     value captured here
 ...
 LL | }
-   |  - `data` dropped here while still borrowed
+   | - `data` dropped here while still borrowed
 
 error: aborting due to 2 previous errors
 
