@@ -138,7 +138,12 @@ pub enum Candidate {
     /// intrinsic. The intrinsic requires the arguments are indeed constant and
     /// the attribute currently provides the semantic requirement that arguments
     /// must be constant.
-    Argument { bb: BasicBlock, index: usize },
+    Argument {
+        bb: BasicBlock,
+        index: usize,
+        span: Span,
+        is_shuffle: bool,
+    },
 }
 
 fn args_required_const(tcx: TyCtxt<'_>, def_id: DefId) -> Option<Vec<usize>> {
@@ -248,13 +253,20 @@ impl<'tcx> Visitor<'tcx> for Collector<'_, 'tcx> {
                         self.candidates.push(Candidate::Argument {
                             bb: location.block,
                             index: 2,
+                            span: self.span,
+                            is_shuffle: true,
                         });
                     }
                 }
 
                 if let Some(constant_args) = args_required_const(self.tcx, def_id) {
                     for index in constant_args {
-                        self.candidates.push(Candidate::Argument { bb: location.block, index });
+                        self.candidates.push(Candidate::Argument {
+                            bb: location.block,
+                            index,
+                            span: self.span,
+                            is_shuffle: false,
+                        });
                     }
                 }
             }
@@ -420,7 +432,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                     _ => bug!()
                 }
             },
-            Candidate::Argument { bb, index } => {
+            Candidate::Argument { bb, index, .. } => {
                 assert!(self.explicit);
 
                 let terminator = self.body[bb].terminator();
@@ -1008,7 +1020,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                         _ => bug!()
                     }
                 },
-                Candidate::Argument { bb, index } => {
+                Candidate::Argument { bb, index, .. } => {
                     let terminator = blocks[bb].terminator_mut();
                     match terminator.kind {
                         TerminatorKind::Call { ref mut args, .. } => {
@@ -1170,4 +1182,126 @@ pub fn promote_candidates<'tcx>(
     }
 
     promotions
+}
+
+/// In `const` and `static` everything without `StorageDead`
+/// is `'static`, we don't have to create promoted MIR fragments,
+/// just remove `Drop` and `StorageDead` on "promoted" locals.
+fn remove_drop_and_storage_dead_on_promoted_locals(
+    body: &mut Body<'tcx>,
+    promotable_candidates: &[Candidate],
+) {
+    debug!("run_pass: promotable_candidates={:?}", promotable_candidates);
+
+    // Removing StorageDead` will cause errors for temps declared inside a loop body. For now we
+    // simply skip promotion if a loop exists, since loops are not yet allowed in a `const`.
+    //
+    // FIXME: Just create MIR fragments for `const`s instead of using this hackish approach?
+    if body.is_cfg_cyclic() {
+        debug!("promote_consts: skipping lifetime extension due to loop in `const`");
+        return;
+    }
+
+    // The underlying local for promotion contexts like `&temp` and `&(temp.proj)`.
+    let mut requires_lifetime_extension = HybridBitSet::new_empty(body.local_decls.len());
+
+    promotable_candidates
+        .iter()
+        .filter_map(|c| {
+            match c {
+                Candidate::Ref(loc) => Some(loc),
+                Candidate::Repeat(_) | Candidate::Argument { .. } => None,
+            }
+        })
+        .map(|&Location { block, statement_index }| {
+            // FIXME: store the `Local` for each `Candidate` when it is created.
+            let place = match &body[block].statements[statement_index].kind {
+                StatementKind::Assign(box ( _, Rvalue::Ref(_, _, place))) => place,
+                _ => bug!("`Candidate::Ref` without corresponding assignment"),
+            };
+
+            match place.base {
+                PlaceBase::Local(local) => local,
+                PlaceBase::Static(_) => bug!("`Candidate::Ref` for a non-local"),
+            }
+        })
+        .for_each(|local| {
+            requires_lifetime_extension.insert(local);
+        });
+
+    // Remove `Drop` terminators and `StorageDead` statements for all promotable temps that require
+    // lifetime extension.
+    for block in body.basic_blocks_mut() {
+        block.statements.retain(|statement| {
+            match statement.kind {
+                StatementKind::StorageDead(index) => !requires_lifetime_extension.contains(index),
+                _ => true
+            }
+        });
+        let terminator = block.terminator_mut();
+        match &terminator.kind {
+            TerminatorKind::Drop {
+                location,
+                target,
+                ..
+            } => {
+                if let Some(index) = location.as_local() {
+                    if requires_lifetime_extension.contains(index) {
+                        terminator.kind = TerminatorKind::Goto { target: *target };
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn should_create_promoted_mir_fragments_for(const_kind: Option<ConstKind>) -> bool {
+    match const_kind {
+        Some(ConstKind::ConstFn) | None => true,
+        Some(ConstKind::Const) | Some(ConstKind::Static) | Some(ConstKind::StaticMut) => false,
+    }
+}
+
+// FIXME: This is goofy. We should record candidates at the same time we validate them for
+// promotability so we can emit errors when promotion fails inside the visitor.
+fn check_rustc_args_required_const(
+    tcx: TyCtxt<'tcx>,
+    all_candidates: &[Candidate],
+    promotable_candidates: &[Candidate],
+) {
+    use std::cmp::Ordering;
+
+    let get_arg = |c: &Candidate| {
+        match *c {
+            Candidate::Argument { bb, index, span, is_shuffle }
+                => Some((bb, index, span, is_shuffle)),
+
+            _ => None,
+        }
+    };
+
+    let all_arg_candidates = all_candidates.into_iter().filter_map(get_arg);
+    let promotable_arg_candidates = promotable_candidates.into_iter().filter_map(get_arg);
+
+    match all_arg_candidates.clone().count().cmp(&promotable_arg_candidates.clone().count()) {
+        // In the common case, all arguments to `#[rustc_args_required_const]` will be promotable.
+        Ordering::Equal => return,
+
+        Ordering::Greater => (),
+        Ordering::Less => bug!("promotable candidates must be a subset of all candidates"),
+    }
+
+    let all_arg_candidates: BTreeSet<_> = all_arg_candidates.collect();
+    let promotable_arg_candidates: BTreeSet<_> = promotable_arg_candidates.collect();
+
+    let arg_promotion_failed = all_arg_candidates.symmetric_difference(&promotable_arg_candidates);
+    for &(_, arg_index, span, is_shuffle) in arg_promotion_failed {
+        if is_shuffle {
+            span_err!(tcx.sess, span, E0526, "shuffle indices are not constant");
+        } else {
+            let msg = format!("argument {} is required to be a constant", arg_index + 1);
+            tcx.sess.span_err(span, &msg);
+        }
+    }
 }
