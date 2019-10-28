@@ -1790,7 +1790,7 @@ fn error_min_const_fn_violation(tcx: TyCtxt<'_>, span: Span, msg: Cow<'_, str>) 
         .emit();
 }
 
-fn check_short_circuiting_in_const_local(tcx: TyCtxt<'_>, body: &mut Body<'tcx>, mode: Mode) {
+fn check_short_circuiting_in_const_local(tcx: TyCtxt<'_>, body: &Body<'tcx>, mode: Mode) {
     if body.control_flow_destroyed.is_empty() {
         return;
     }
@@ -1857,7 +1857,7 @@ fn remove_drop_and_storage_dead_on_promoted_locals(
     }
 }
 
-fn check_static_is_sync(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, hir_id: HirId) {
+fn check_static_is_sync(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, hir_id: HirId) {
     let ty = body.return_ty();
     tcx.infer_ctxt().enter(|infcx| {
         let cause = traits::ObligationCause::new(body.span, hir_id, traits::SharedStatic);
