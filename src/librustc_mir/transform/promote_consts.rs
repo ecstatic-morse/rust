@@ -29,7 +29,7 @@ use rustc_target::spec::abi::Abi;
 
 use std::{iter, mem, usize};
 
-use crate::transform::check_consts::{qualifs, Item, ConstKind, is_lang_panic_fn};
+use crate::transform::check_consts::{qualifs, QualifSet, Item, ConstKind, is_lang_panic_fn};
 
 /// State of a temporary during collection and promotion.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -258,7 +258,7 @@ impl std::ops::Deref for Validator<'a, 'tcx> {
     }
 }
 
-struct Unpromotable;
+pub struct Unpromotable;
 
 impl<'tcx> Validator<'_, 'tcx> {
     fn validate_candidate(&self, candidate: Candidate) -> Result<(), Unpromotable> {
@@ -537,7 +537,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                         // fail to pass const-checking, as compilation would've
                         // errored independently and promotion can't change that.
                         let (bits, _) = self.tcx.at(constant.span).mir_const_qualif(def_id);
-                        if bits == super::qualify_consts::QUALIF_ERROR_BIT {
+                        if QualifSet(bits).contains::<Unpromotable>() {
                             self.tcx.sess.delay_span_bug(
                                 constant.span,
                                 "promote_consts: MIR had errors",
