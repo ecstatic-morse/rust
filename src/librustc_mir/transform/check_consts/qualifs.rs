@@ -11,6 +11,8 @@ use super::{ConstKind, Item as ConstCx};
 pub struct QualifSet(pub u8);
 
 impl QualifSet {
+    pub const UNPROMOTABLE: Self = QualifSet(0b111);
+
     pub fn contains<Q: ?Sized + QualifIdx>(self) -> bool {
         self.0 & (1 << Q::IDX) != 0
     }
@@ -54,7 +56,7 @@ macro_rules! qualif_indices {
     ($i:expr =>) => {}
 }
 
-qualif_indices!(0 => HasMutInterior, NeedsDrop);
+qualif_indices!(0 => HasMutInterior, NeedsDrop, crate::transform::promote_consts::Unpromotable);
 
 /// A "qualif"(-ication) is a way to look for something "bad" in the MIR that would disqualify some
 /// code for promotion or prevent it from evaluating at compile time. So `return true` means

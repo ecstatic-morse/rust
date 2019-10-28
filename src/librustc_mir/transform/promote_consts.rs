@@ -33,7 +33,7 @@ use std::cell::Cell;
 use std::{iter, mem, usize};
 
 use crate::transform::{MirPass, MirSource};
-use crate::transform::check_consts::{qualifs, Item, ConstKind, is_lang_panic_fn};
+use crate::transform::check_consts::{qualifs, QualifSet, Item, ConstKind, is_lang_panic_fn};
 
 pub struct PromoteTemps<'tcx> {
     pub promoted_fragments: Cell<IndexVec<Promoted, Body<'tcx>>>,
@@ -320,7 +320,7 @@ impl std::ops::Deref for Validator<'a, 'tcx> {
     }
 }
 
-struct Unpromotable;
+pub struct Unpromotable;
 
 impl<'tcx> Validator<'_, 'tcx> {
     fn validate_candidate(&self, candidate: Candidate) -> Result<(), Unpromotable> {
@@ -599,7 +599,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                         // fail to pass const-checking, as compilation would've
                         // errored independently and promotion can't change that.
                         let bits = self.tcx.at(constant.span).mir_const_qualif(def_id);
-                        if bits == super::qualify_consts::QUALIF_ERROR_BIT {
+                        if QualifSet(bits).contains::<Unpromotable>() {
                             self.tcx.sess.delay_span_bug(
                                 constant.span,
                                 "promote_consts: MIR had errors",
