@@ -96,6 +96,13 @@ impl ConstKind {
         }
     }
 
+    pub fn is_always_evaluated_at_compile_time(self) -> bool {
+        match self {
+            ConstKind::Static | ConstKind::StaticMut  | ConstKind::Const => true,
+            ConstKind::ConstFn => false,
+        }
+    }
+
     /// Returns `true` if the value returned by this item must be `Sync`.
     ///
     /// This returns false for `StaticMut` since all accesses to one are `unsafe` anyway.
