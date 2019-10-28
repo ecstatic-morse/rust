@@ -3,12 +3,13 @@
 use rustc::mir::visit::{PlaceContext, Visitor, MutatingUseContext, NonMutatingUseContext};
 use rustc::mir::*;
 use rustc::ty::cast::CastTy;
-use rustc::ty;
+use rustc::ty::{self, TyCtxt};
 use rustc_index::bit_set::BitSet;
 use rustc_target::spec::abi::Abi;
 use syntax::symbol::sym;
 use syntax_pos::Span;
 
+use std::borrow::Cow;
 use std::fmt;
 use std::ops::Deref;
 
@@ -217,6 +218,36 @@ impl Validator<'a, 'mir, 'tcx> {
         }
     }
 
+    pub fn check_body(&mut self) {
+        let Item { tcx, body, def_id, const_kind, ..  } = *self.item;
+
+        let use_min_const_fn_checks =
+            tcx.is_min_const_fn(def_id)
+            && !tcx.sess.opts.debugging_opts.unleash_the_miri_inside_of_you;
+
+        if use_min_const_fn_checks {
+            // Enforce `min_const_fn` for stable `const fn`s.
+            use crate::transform::qualify_min_const_fn::is_min_const_fn;
+            if let Err((span, err)) = is_min_const_fn(tcx, def_id, body) {
+                error_min_const_fn_violation(tcx, span, err);
+                return;
+            }
+        }
+
+        check_short_circuiting_in_const_local(self.item);
+
+        // FIXME: give a span for the loop
+        if body.is_cfg_cyclic() {
+            self.check_op(ops::Loop);
+        }
+
+        self.visit_body(body);
+    }
+
+    pub fn qualifs_in_return_place(&mut self) -> QualifSet {
+        self.qualifs.in_return_place(self.item.body)
+    }
+
     pub fn take_errors(&mut self) -> Vec<(Span, String)> {
         std::mem::replace(&mut self.errors, vec![])
     }
@@ -259,6 +290,25 @@ impl Validator<'a, 'mir, 'tcx> {
 }
 
 impl Visitor<'tcx> for Validator<'_, 'mir, 'tcx> {
+    fn visit_basic_block_data(
+        &mut self,
+        bb: BasicBlock,
+        block: &BasicBlockData<'tcx>,
+    ) {
+        trace!("visit_basic_block_data: bb={:?} is_cleanup={:?}", bb, block.is_cleanup);
+
+        // Just as the old checker did, we skip const-checking basic blocks on the unwind path.
+        // These blocks often drop locals that would otherwise be returned from the function.
+        //
+        // FIXME: This shouldn't be unsound since a panic at compile time will cause a compiler
+        // error anyway, but maybe we should do more here?
+        if block.is_cleanup {
+            return;
+        }
+
+        self.super_basic_block_data(bb, block);
+    }
+
     fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
         trace!("visit_rvalue: rvalue={:?} location={:?}", rvalue, location);
 
@@ -604,5 +654,47 @@ impl Visitor<'tcx> for Validator<'_, 'mir, 'tcx> {
 
             _ => {}
         }
+    }
+}
+
+fn error_min_const_fn_violation(tcx: TyCtxt<'_>, span: Span, msg: Cow<'_, str>) {
+    struct_span_err!(tcx.sess, span, E0723, "{}", msg)
+        .note("for more information, see issue https://github.com/rust-lang/rust/issues/57563")
+        .help("add `#![feature(const_fn)]` to the crate attributes to enable")
+        .emit();
+}
+
+fn check_short_circuiting_in_const_local(item: &Item<'_, 'tcx>) {
+    let body = item.body;
+
+    if body.control_flow_destroyed.is_empty() {
+        return;
+    }
+
+    let mut locals = body.vars_iter();
+    if let Some(local) = locals.next() {
+        let span = body.local_decls[local].source_info.span;
+        let mut error = item.tcx.sess.struct_span_err(
+            span,
+            &format!(
+                "new features like let bindings are not permitted in {}s \
+                which also use short circuiting operators",
+                item.const_kind(),
+            ),
+        );
+        for (span, kind) in body.control_flow_destroyed.iter() {
+            error.span_note(
+                *span,
+                &format!("use of {} here does not actually short circuit due to \
+                the const evaluator presently not being able to do control flow. \
+                See https://github.com/rust-lang/rust/issues/49146 for more \
+                information.", kind),
+            );
+        }
+        for local in locals {
+            let span = body.local_decls[local].source_info.span;
+            error.span_note(span, "more locals defined here");
+        }
+        error.emit();
     }
 }
