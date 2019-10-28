@@ -7,14 +7,60 @@ use syntax_pos::DUMMY_SP;
 
 use super::{ConstKind, Item as ConstCx};
 
-#[derive(Clone, Copy)]
-pub struct QualifSet(u8);
+/// A bitset that describes which qualifs are present for a `Local` or the return place of a MIR
+/// body.
+#[derive(Clone, Copy, Default)]
+pub struct QualifSet(pub u8);
 
 impl QualifSet {
-    fn contains<Q: ?Sized + Qualif>(self) -> bool {
+    pub fn contains<Q: ?Sized + QualifIdx>(self) -> bool {
         self.0 & (1 << Q::IDX) != 0
     }
+
+    pub fn insert<Q: ?Sized + QualifIdx>(&mut self) {
+        self.0 |= 1 << Q::IDX;
+    }
+
+    pub fn remove<Q: ?Sized + QualifIdx>(&mut self) {
+        self.0 &= !(1 << Q::IDX);
+    }
+
+    pub fn set<Q: ?Sized + QualifIdx>(&mut self, yes: bool) {
+        if yes {
+            self.insert::<Q>();
+        } else {
+            self.remove::<Q>();
+        }
+    }
 }
+
+impl From<QualifSet> for u8 {
+    fn from(bits: QualifSet) -> Self {
+        bits.0
+    }
+}
+
+/// A type that can be held in a `QualifSet`.
+///
+/// This trait should not be implemented directly. Instead, add the new qualif to the
+/// `qualif_indices` macro below.
+pub trait QualifIdx {
+    const IDX: usize;
+}
+
+macro_rules! qualif_indices {
+    ($i:expr => $T:ty $(, $tail:ty)* $(,)?) => {
+        impl QualifIdx for $T {
+            const IDX: usize = $i;
+        }
+
+        qualif_indices!($i + 1 => $($tail),*);
+    };
+
+    ($i:expr =>) => {}
+}
+
+qualif_indices!(0 => HasMutInterior, NeedsDrop);
 
 /// A "qualif"(-ication) is a way to look for something "bad" in the MIR that would disqualify some
 /// code for promotion or prevent it from evaluating at compile time. So `return true` means
@@ -22,9 +68,7 @@ impl QualifSet {
 /// definitely cannot find anything bad anywhere.
 ///
 /// The default implementations proceed structurally.
-pub trait Qualif {
-    const IDX: usize;
-
+pub trait Qualif: QualifIdx {
     /// The name of the file used to debug the dataflow analysis that computes this qualif.
     const ANALYSIS_NAME: &'static str;
 
@@ -211,7 +255,6 @@ pub trait Qualif {
 pub struct HasMutInterior;
 
 impl Qualif for HasMutInterior {
-    const IDX: usize = 0;
     const ANALYSIS_NAME: &'static str = "flow_has_mut_interior";
 
     fn in_any_value_of_ty(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> bool {
@@ -276,7 +319,6 @@ impl Qualif for HasMutInterior {
 pub struct NeedsDrop;
 
 impl Qualif for NeedsDrop {
-    const IDX: usize = 1;
     const ANALYSIS_NAME: &'static str = "flow_needs_drop";
     const IS_CLEARED_ON_MOVE: bool = true;
 

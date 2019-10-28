@@ -10,7 +10,7 @@ use rustc::ty::{self, TyCtxt};
 
 use std::fmt;
 
-pub use self::qualifs::Qualif;
+pub use self::qualifs::{Qualif, QualifSet};
 
 pub mod ops;
 pub mod qualifs;
