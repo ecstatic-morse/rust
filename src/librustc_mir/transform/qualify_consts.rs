@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 //! A pass that qualifies constness of temporaries in constants,
 //! static initializers and functions and also drives promotion.
 //!
@@ -1053,7 +1055,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             qualifs = self.qualifs_in_any_value_of_ty(body.return_ty());
         }
 
-        (qualifs.encode_to_bits(), self.tcx.arena.alloc(promoted_temps))
+        qualifs.encode_to_bits()
     }
 
     /// Get the subset of `unchecked_promotion_candidates` that are eligible
@@ -1539,7 +1541,12 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                         continue;
                     }
 
-                    let candidate = Candidate::Argument { bb: location.block, index: i };
+                    let candidate = Candidate::Argument {
+                        bb: location.block,
+                        index: i,
+                        span: self.span,
+                        is_shuffle,
+                    };
                     // Since the argument is required to be constant,
                     // we care about constness, not promotability.
                     // If we checked for promotability, we'd miss out on
@@ -1686,6 +1693,7 @@ fn mir_const_qualif(tcx: TyCtxt<'_>, def_id: DefId) -> u8 {
     Checker::new(tcx, def_id, body, Mode::Const).check_const()
 }
 
+// FIXME: not really used for promotion anymore
 pub struct QualifyAndPromoteConstants<'tcx> {
     pub promoted: Cell<IndexVec<Promoted, Body<'tcx>>>,
 }
@@ -1716,58 +1724,52 @@ impl<'tcx> MirPass<'tcx> for QualifyAndPromoteConstants<'tcx> {
         let mode = determine_mode(tcx, hir_id, def_id);
 
         debug!("run_pass: mode={:?}", mode);
-        if let Mode::NonConstFn | Mode::ConstFn = mode {
-            // This is ugly because Checker holds onto mir,
-            // which can't be mutated until its scope ends.
-            let (temps, candidates) = {
-                let mut checker = Checker::new(tcx, def_id, body, mode);
-                if let Mode::ConstFn = mode {
-                    let use_min_const_fn_checks =
-                        !tcx.sess.opts.debugging_opts.unleash_the_miri_inside_of_you &&
-                        tcx.is_min_const_fn(def_id);
-                    if use_min_const_fn_checks {
-                        // Enforce `min_const_fn` for stable `const fn`s.
-                        use super::qualify_min_const_fn::is_min_const_fn;
-                        if let Err((span, err)) = is_min_const_fn(tcx, def_id, body) {
-                            error_min_const_fn_violation(tcx, span, err);
-                            return;
-                        }
 
-                        // `check_const` should not produce any errors, but better safe than sorry
-                        // FIXME(#53819)
-                        // NOTE(eddyb) `check_const` is actually needed for promotion inside
-                        // `min_const_fn` functions.
-                    }
+        // No need to even initialize the checker for a non-const `fn`.
+        if let Mode::NonConstFn = mode {
+            return;
+        }
 
-                    // Enforce a constant-like CFG for `const fn`.
-                    checker.check_const();
-                } else {
-                    while let Some((bb, data)) = checker.rpo.next() {
-                        checker.visit_basic_block_data(bb, data);
+        let mut checker = Checker::new(tcx, def_id, body, mode);
+        match mode {
+            Mode::NonConstFn => unreachable!("handled above"),
+
+            Mode::ConstFn => {
+                let use_min_const_fn_checks =
+                    !tcx.sess.opts.debugging_opts.unleash_the_miri_inside_of_you &&
+                    tcx.is_min_const_fn(def_id);
+                if use_min_const_fn_checks {
+                    // Enforce `min_const_fn` for stable `const fn`s.
+                    use super::qualify_min_const_fn::is_min_const_fn;
+                    if let Err((span, err)) = is_min_const_fn(tcx, def_id, body) {
+                        error_min_const_fn_violation(tcx, span, err);
+                        return;
                     }
                 }
 
-                let promotion_candidates = checker.valid_promotion_candidates();
-                (checker.temp_promotion_state, promotion_candidates)
-            };
+                // FIXME(#53819): `check_const` should not produce any errors for a `const fn`,
+                // but better safe than sorry
+                checker.check_const();
+            }
 
-            // Do the actual promotion, now that we know what's viable.
-            self.promoted.set(
-                promote_consts::promote_candidates(def_id, body, tcx, temps, candidates)
-            );
-        } else {
-            check_short_circuiting_in_const_local(tcx, body, mode);
-
-            let promoted_temps = match mode {
-                Mode::Const => tcx.mir_const_qualif(def_id).1,
-                _ => Checker::new(tcx, def_id, body, mode).check_const().1,
-            };
-            remove_drop_and_storage_dead_on_promoted_locals(body, promoted_temps);
-        }
-
-        if mode == Mode::Static && !tcx.has_attr(def_id, sym::thread_local) {
             // `static`s (not `static mut`s) which are not `#[thread_local]` must be `Sync`.
-            check_static_is_sync(tcx, body, hir_id);
+            Mode::Static => {
+                check_short_circuiting_in_const_local(tcx, body, mode);
+                checker.check_const();
+                if !tcx.has_attr(def_id, sym::thread_local) {
+                    check_static_is_sync(tcx, body, hir_id);
+                }
+            }
+
+            Mode::StaticMut => {
+                check_short_circuiting_in_const_local(tcx, body, mode);
+                checker.check_const();
+            }
+
+            Mode::Const => {
+                check_short_circuiting_in_const_local(tcx, body, mode);
+                tcx.mir_const_qualif(def_id);
+            }
         }
     }
 }
@@ -1820,40 +1822,6 @@ fn check_short_circuiting_in_const_local(tcx: TyCtxt<'_>, body: &Body<'tcx>, mod
             error.span_note(span, "more locals defined here");
         }
         error.emit();
-    }
-}
-
-/// In `const` and `static` everything without `StorageDead`
-/// is `'static`, we don't have to create promoted MIR fragments,
-/// just remove `Drop` and `StorageDead` on "promoted" locals.
-fn remove_drop_and_storage_dead_on_promoted_locals(
-    body: &mut Body<'tcx>,
-    promoted_temps: &BitSet<Local>,
-) {
-    debug!("run_pass: promoted_temps={:?}", promoted_temps);
-
-    for block in body.basic_blocks_mut() {
-        block.statements.retain(|statement| {
-            match statement.kind {
-                StatementKind::StorageDead(index) => !promoted_temps.contains(index),
-                _ => true
-            }
-        });
-        let terminator = block.terminator_mut();
-        match &terminator.kind {
-            TerminatorKind::Drop {
-                location,
-                target,
-                ..
-            } => {
-                if let Some(index) = location.as_local() {
-                    if promoted_temps.contains(index) {
-                        terminator.kind = TerminatorKind::Goto { target: *target };
-                    }
-                }
-            }
-            _ => {}
-        }
     }
 }
 
