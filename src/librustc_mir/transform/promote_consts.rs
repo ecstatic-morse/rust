@@ -17,7 +17,7 @@ use rustc::mir::*;
 use rustc::mir::interpret::ConstValue;
 use rustc::mir::visit::{PlaceContext, MutatingUseContext, MutVisitor, Visitor};
 use rustc::mir::traversal::ReversePostorder;
-use rustc::ty::{self, List, TyCtxt};
+use rustc::ty::{self, List, TyCtxt, TypeFoldable};
 use rustc::ty::subst::InternalSubsts;
 use rustc::ty::cast::CastTy;
 use syntax::ast::LitKind;
@@ -25,11 +25,72 @@ use syntax::symbol::sym;
 use syntax_pos::{Span, DUMMY_SP};
 
 use rustc_index::vec::{IndexVec, Idx};
+use rustc_index::bit_set::HybridBitSet;
 use rustc_target::spec::abi::Abi;
 
+use std::collections::BTreeSet;
+use std::cell::Cell;
 use std::{iter, mem, usize};
 
+use crate::transform::{MirPass, MirSource};
 use crate::transform::check_consts::{qualifs, Item, ConstKind, is_lang_panic_fn};
+
+pub struct PromoteTemps<'tcx> {
+    pub promoted_fragments: Cell<IndexVec<Promoted, Body<'tcx>>>,
+}
+
+impl<'tcx> Default for PromoteTemps<'tcx> {
+    fn default() -> Self {
+        PromoteTemps {
+            promoted_fragments: Cell::new(IndexVec::new()),
+        }
+    }
+}
+
+impl<'tcx> MirPass<'tcx> for PromoteTemps<'tcx> {
+    fn run_pass(&self, tcx: TyCtxt<'tcx>, src: MirSource<'tcx>, body: &mut Body<'tcx>) {
+        // There's not really any point in promoting errorful MIR.
+        //
+        // Note that we do still try to promote MIR that failed const checking.
+        if body.return_ty().references_error() {
+            tcx.sess.delay_span_bug(body.span, "QualifyAndPromoteConstants: MIR had errors");
+            return;
+        }
+
+        if src.promoted.is_some() {
+            return;
+        }
+
+        let def_id = src.def_id();
+
+        let mut rpo = traversal::reverse_postorder(body);
+        let (temps, all_candidates) = collect_temps_and_candidates(tcx, body, &mut rpo);
+        rpo.reset();
+
+        debug!("PromoteTemps: temp_state={:?}", temps);
+        let promotable_candidates = validate_candidates(tcx, body, def_id, &temps, &all_candidates);
+
+        let const_kind = ConstKind::for_item(tcx, def_id);
+        if !const_kind.map_or(false, ConstKind::is_always_evaluated_at_compile_time) {
+            check_rustc_args_required_const(tcx, &all_candidates, &promotable_candidates);
+        }
+
+        // For now, lifetime extension is done in `const` and `static`s without creating promoted
+        // MIR fragments by removing `Drop` and `StorageDead` for each referent. However, this will
+        // not work inside loops when they are allowed in `const`s.
+        //
+        // FIXME: use promoted MIR fragments everywhere?
+        let promoted_fragments = if should_create_promoted_mir_fragments_for(const_kind) {
+            promote_candidates(def_id, body, tcx, temps, promotable_candidates)
+        } else {
+            // FIXME: promote const array initializers in consts.
+            remove_drop_and_storage_dead_on_promoted_locals(body, &promotable_candidates);
+            IndexVec::new()
+        };
+
+        self.promoted_fragments.set(promoted_fragments);
+    }
+}
 
 /// State of a temporary during collection and promotion.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
