@@ -2,7 +2,7 @@ use crate::{build, shim};
 use rustc_index::vec::IndexVec;
 use rustc::hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
 use rustc::mir::{Body, MirPhase, Promoted};
-use rustc::ty::{TyCtxt, InstanceDef};
+use rustc::ty::{TyCtxt, InstanceDef, TypeFoldable};
 use rustc::ty::query::Providers;
 use rustc::ty::steal::Steal;
 use rustc::hir;
@@ -38,12 +38,12 @@ pub mod inline;
 pub mod uniform_array_move_out;
 
 pub(crate) fn provide(providers: &mut Providers<'_>) {
-    self::qualify_consts::provide(providers);
     self::check_unsafety::provide(providers);
     *providers = Providers {
         mir_keys,
         mir_built,
         mir_const,
+        mir_const_qualif,
         mir_validated,
         optimized_mir,
         is_mir_available,
@@ -182,6 +182,46 @@ pub fn run_passes(
     }
 
     body.phase = mir_phase;
+}
+
+fn mir_const_qualif(tcx: TyCtxt<'_>, def_id: DefId) -> u8 {
+    let const_kind = check_consts::ConstKind::for_item(tcx, def_id);
+
+    // No need to const-check a non-const `fn`.
+    if const_kind.is_none() {
+        return 0;
+    }
+
+    // N.B., this `borrow()` is guaranteed to be valid (i.e., the value
+    // cannot yet be stolen), because `mir_validated()`, which steals
+    // from `mir_const(), forces this query to execute before
+    // performing the steal.
+    let body = &tcx.mir_const(def_id).borrow();
+
+    if body.return_ty().references_error() {
+        tcx.sess.delay_span_bug(body.span, "mir_const_qualif: MIR had errors");
+        return check_consts::QualifSet::UNPROMOTABLE.into();
+    }
+
+    let item = check_consts::Item {
+        body,
+        tcx,
+        def_id,
+        const_kind,
+        param_env: tcx.param_env(def_id),
+    };
+
+    let mut validator = check_consts::validation::Validator::new(&item);
+    validator.check_body();
+
+    // Mark this MIR as unpromotable.
+    if !validator.take_errors().is_empty() {
+        return check_consts::QualifSet::UNPROMOTABLE.into();
+    }
+
+    // We return the qualifs in the return place for every MIR body, even though it is only used
+    // when deciding to promote a reference to a `const` for now.
+    validator.qualifs_in_return_place().into()
 }
 
 fn mir_const(tcx: TyCtxt<'_>, def_id: DefId) -> &Steal<Body<'_>> {
