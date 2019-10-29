@@ -1,7 +1,10 @@
 //! The `Visitor` responsible for actually checking a `mir::Body` for invalid operations.
 
+use rustc::hir::HirId;
+use rustc::middle::lang_items;
 use rustc::mir::visit::{PlaceContext, Visitor, MutatingUseContext, NonMutatingUseContext};
 use rustc::mir::*;
+use rustc::traits::{self, TraitEngine};
 use rustc::ty::cast::CastTy;
 use rustc::ty::{self, TyCtxt};
 use rustc_index::bit_set::BitSet;
@@ -242,6 +245,15 @@ impl Validator<'a, 'mir, 'tcx> {
         }
 
         self.visit_body(body);
+
+        // Ensure that the end result is `Sync` in a non-thread local `static`.
+        let should_check_for_sync = const_kind == Some(ConstKind::Static)
+            && !tcx.has_attr(def_id, sym::thread_local);
+
+        if should_check_for_sync {
+            let hir_id = tcx.hir().as_local_hir_id(def_id).unwrap();
+            check_return_ty_is_sync(tcx, body, hir_id);
+        }
     }
 
     pub fn qualifs_in_return_place(&mut self) -> QualifSet {
@@ -697,4 +709,17 @@ fn check_short_circuiting_in_const_local(item: &Item<'_, 'tcx>) {
         }
         error.emit();
     }
+}
+
+fn check_return_ty_is_sync(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, hir_id: HirId) {
+    let ty = body.return_ty();
+    tcx.infer_ctxt().enter(|infcx| {
+        let cause = traits::ObligationCause::new(body.span, hir_id, traits::SharedStatic);
+        let mut fulfillment_cx = traits::FulfillmentContext::new();
+        let sync_def_id = tcx.require_lang_item(lang_items::SyncTraitLangItem, Some(body.span));
+        fulfillment_cx.register_bound(&infcx, ty::ParamEnv::empty(), ty, sync_def_id, cause);
+        if let Err(err) = fulfillment_cx.select_all_or_error(&infcx) {
+            infcx.report_fulfillment_errors(&err, None, false);
+        }
+    });
 }
