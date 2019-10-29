@@ -977,7 +977,6 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 
         let mut seen_blocks = BitSet::new_empty(body.basic_blocks().len());
         let mut bb = START_BLOCK;
-        let mut has_controlflow_error = false;
         loop {
             seen_blocks.insert(bb.index());
 
@@ -1018,7 +1017,6 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                     bb = target;
                 }
                 _ => {
-                    has_controlflow_error = true;
                     self.not_const(ops::Loop);
                     validator.check_op(ops::Loop);
                     break;
@@ -1045,6 +1043,9 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             }
         }
 
+        // Even though we don't use the promotion candidates anymore, call
+        // `valid_promotion_candidates` to check for any divergence.
+        //
         // HACK(eddyb) don't try to validate promotion candidates if any
         // parts of the control-flow graph were skipped due to an error.
         if !has_controlflow_error {
@@ -1730,7 +1731,7 @@ impl<'tcx> MirPass<'tcx> for QualifyAndPromoteConstants<'tcx> {
         if let Mode::NonConstFn | Mode::ConstFn = mode {
             // This is ugly because Checker holds onto mir,
             // which can't be mutated until its scope ends.
-            let (temps, candidates) = {
+            let (_temps, _candidates) = {
                 let mut checker = Checker::new(tcx, def_id, body, mode);
                 if let Mode::ConstFn = mode {
                     let use_min_const_fn_checks =
@@ -1761,19 +1762,13 @@ impl<'tcx> MirPass<'tcx> for QualifyAndPromoteConstants<'tcx> {
                 let promotion_candidates = checker.valid_promotion_candidates();
                 (checker.temp_promotion_state, promotion_candidates)
             };
-
-            // Do the actual promotion, now that we know what's viable.
-            self.promoted.set(
-                promote_consts::promote_candidates(def_id, body, tcx, temps, candidates)
-            );
         } else {
             check_short_circuiting_in_const_local(tcx, body, mode);
 
-            let promoted_temps = match mode {
-                Mode::Const => tcx.mir_const_qualif(def_id).1,
-                _ => Checker::new(tcx, def_id, body, mode).check_const().1,
+            let _promoted_temps = match mode {
+                Mode::Const => tcx.mir_const_qualif(def_id),
+                _ => Checker::new(tcx, def_id, body, mode).check_const(),
             };
-            remove_drop_and_storage_dead_on_promoted_locals(body, promoted_temps);
         }
 
         if mode == Mode::Static && !tcx.has_attr(def_id, sym::thread_local) {
