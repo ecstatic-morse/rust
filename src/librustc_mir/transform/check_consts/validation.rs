@@ -1,5 +1,6 @@
 //! The `Visitor` responsible for actually checking a `mir::Body` for invalid operations.
 
+use rustc_data_structures::graph::scc::Sccs;
 use rustc::hir::HirId;
 use rustc::middle::lang_items;
 use rustc::mir::visit::{PlaceContext, Visitor, MutatingUseContext, NonMutatingUseContext};
@@ -8,6 +9,7 @@ use rustc::traits::{self, TraitEngine};
 use rustc::ty::cast::CastTy;
 use rustc::ty::{self, TyCtxt};
 use rustc_index::bit_set::BitSet;
+use rustc_index::vec::IndexVec;
 use rustc_target::spec::abi::Abi;
 use syntax::symbol::sym;
 use syntax_pos::Span;
@@ -243,9 +245,8 @@ impl Validator<'a, 'mir, 'tcx> {
 
         check_short_circuiting_in_const_local(self.item);
 
-        // FIXME: give a span for the loop
-        if body.is_cfg_cyclic() {
-            self.check_op(ops::Loop);
+        for loop_span in check_control_flow_graph_for_cycles(body) {
+            self.check_op_spanned(ops::Loop, loop_span);
         }
 
         self.visit_body(body);
@@ -739,4 +740,51 @@ fn check_return_ty_is_sync(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, hir_id: HirId) 
             infcx.report_fulfillment_errors(&err, None, false);
         }
     });
+}
+
+/// Searches for loop constructs in a MIR body and tries to map each to a useful `Span`.
+fn check_control_flow_graph_for_cycles(body: &Body<'tcx>) -> Vec<Span> {
+    // Fast path: if the body has no loops, there's no need to run the more expensive strongly
+    // connected components algorithm: a simple graph traversal will suffice.
+    if !body.is_cfg_cyclic() {
+        return vec![];
+    }
+
+    let sccs: Sccs<_, usize> = Sccs::new(body);
+
+    // Map each SCC to the basic blocks it contains in RPO order.
+    //
+    // FIXME: Add a method to `Sccs` for this.
+    let mut blocks_per_scc = IndexVec::from_elem_n(Vec::new(), sccs.num_sccs());
+    for (bb, _) in traversal::reverse_postorder(body) {
+        let scc = sccs.scc(bb);
+        blocks_per_scc[scc].push(bb);
+    }
+
+    let loop_spans: Vec<_> = blocks_per_scc
+        .into_iter_enumerated()
+        .filter_map(|(scc, blocks)| {
+            debug_assert!(!blocks.is_empty());
+
+            // An SCC of length one does not indicate a cycle unless it is its own successor. This
+            // could occur for a loop with an empty body, e.g., `loop {}`.
+            if blocks.len() == 1 && sccs.successors(scc).iter().find(|&&x| x == scc).is_none() {
+                return None;
+            }
+
+            // Loops should have a `Goto` terminator in the last block (in RPO). We use this to get
+            // the span for the loop.
+            let last_terminator = body[blocks.last().copied().unwrap()].terminator();
+            if let TerminatorKind::Goto { .. } = last_terminator.kind {
+                return Some(last_terminator.source_info.span);
+            }
+
+            // Otherwise, just use the span of the entire body for the error location, since we
+            // don't know which part corresponds to the cycle.
+            Some(body.span)
+        })
+        .collect();
+
+    assert!(!loop_spans.is_empty(), "Cycle found in MIR but no errors reported");
+    loop_spans
 }
