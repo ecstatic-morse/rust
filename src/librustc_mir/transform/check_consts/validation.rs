@@ -561,12 +561,25 @@ impl Visitor<'tcx> for Validator<'_, 'mir, 'tcx> {
     fn visit_statement(&mut self, statement: &Statement<'tcx>, location: Location) {
         trace!("visit_statement: statement={:?} location={:?}", statement, location);
 
-        match statement.kind {
+        match &statement.kind {
             StatementKind::Assign(..) => {
                 self.super_statement(statement, location);
             }
-            StatementKind::FakeRead(FakeReadCause::ForMatchedPlace, _) => {
-                self.check_op(ops::IfOrMatch);
+            StatementKind::FakeRead(FakeReadCause::ForMatchedPlace, box read_place) => {
+                let mut err_span = self.span;
+
+                // Look for a `SwitchInt` terminator in the same block that reads from the same
+                // place. This will provide a better span for the `if` or `match`.
+                let terminator = self.body[location.block].terminator();
+                if let TerminatorKind::SwitchInt { discr, .. } = &terminator.kind {
+                    if let Operand::Move(place) | Operand::Copy(place) = discr {
+                        if place == read_place {
+                            err_span = terminator.source_info.span;
+                        }
+                    }
+                }
+
+                self.check_op_spanned(ops::IfOrMatch, err_span);
             }
             // FIXME(eddyb) should these really do nothing?
             StatementKind::FakeRead(..) |
