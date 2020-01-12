@@ -132,7 +132,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         }
 
         let (cond, error) = match (cond, error) {
-            (&ty::Predicate::Trait(..), &ty::Predicate::Trait(ref error)) => (cond, error),
+            (&ty::Predicate::Trait(..), &ty::Predicate::Trait(ref error, _)) => (cond, error),
             _ => {
                 // FIXME: make this work in other cases too.
                 return false;
@@ -140,7 +140,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         };
 
         for implication in super::elaborate_predicates(self.tcx, vec![cond.clone()]) {
-            if let ty::Predicate::Trait(implication) = implication {
+            if let ty::Predicate::Trait(implication, _) = implication {
                 let error = error.to_poly_trait_ref();
                 let implication = implication.to_poly_trait_ref();
                 // FIXME: I'm just not taking associated types at all here.
@@ -720,7 +720,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     return;
                 }
                 match obligation.predicate {
-                    ty::Predicate::Trait(ref trait_predicate) => {
+                    ty::Predicate::Trait(ref trait_predicate, _) => {
                         let trait_predicate = self.resolve_vars_if_possible(trait_predicate);
 
                         if self.tcx.sess.has_errors() && trait_predicate.references_error() {
@@ -881,7 +881,10 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                                 trait_pred
                             });
                             let unit_obligation = Obligation {
-                                predicate: ty::Predicate::Trait(predicate),
+                                predicate: ty::Predicate::Trait(
+                                    predicate,
+                                    ast::Constness::NotConst,
+                                ),
                                 ..obligation.clone()
                             };
                             if self.predicate_may_hold(&unit_obligation) {
@@ -2047,7 +2050,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         }
 
         let mut err = match predicate {
-            ty::Predicate::Trait(ref data) => {
+            ty::Predicate::Trait(ref data, _) => {
                 let trait_ref = data.to_poly_trait_ref();
                 let self_ty = trait_ref.self_ty();
                 debug!("self_ty {:?} {:?} trait_ref {:?}", self_ty, self_ty.kind, trait_ref);
@@ -2368,7 +2371,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         // the type. The last generator has information about where the bound was introduced. At
         // least one generator should be present for this diagnostic to be modified.
         let (mut trait_ref, mut target_ty) = match obligation.predicate {
-            ty::Predicate::Trait(p) => {
+            ty::Predicate::Trait(p, _) => {
                 (Some(p.skip_binder().trait_ref), Some(p.skip_binder().self_ty()))
             }
             _ => (None, None),
