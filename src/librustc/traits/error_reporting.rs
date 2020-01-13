@@ -1228,8 +1228,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     ..
                 })
                 | hir::Node::Item(hir::Item {
-                    kind: hir::ItemKind::Impl(_, _, _, generics, ..),
-                    ..
+                    kind: hir::ItemKind::Impl { generics, .. }, ..
                 }) if projection.is_some() => {
                     // Missing associated type bound.
                     suggest_restriction(&generics, "the associated type", err);
@@ -1255,7 +1254,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     ..
                 })
                 | hir::Node::Item(hir::Item {
-                    kind: hir::ItemKind::Impl(_, _, _, generics, ..),
+                    kind: hir::ItemKind::Impl { generics, .. },
                     span,
                     ..
                 })

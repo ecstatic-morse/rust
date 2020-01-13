@@ -3076,10 +3076,9 @@ fn associated_item(tcx: TyCtxt<'_>, def_id: DefId) -> AssocItem {
     let parent_def_id = tcx.hir().local_def_id(parent_id);
     let parent_item = tcx.hir().expect_item(parent_id);
     match parent_item.kind {
-        hir::ItemKind::Impl(.., ref impl_item_refs) => {
-            if let Some(impl_item_ref) = impl_item_refs.iter().find(|i| i.id.hir_id == id) {
-                let assoc_item =
-                    tcx.associated_item_from_impl_item_ref(parent_def_id, impl_item_ref);
+        hir::ItemKind::Impl { ref items, .. } => {
+            if let Some(item) = items.iter().find(|i| i.id.hir_id == id) {
+                let assoc_item = tcx.associated_item_from_impl_item_ref(parent_def_id, item);
                 debug_assert_eq!(assoc_item.def_id, def_id);
                 return assoc_item;
             }
@@ -3144,8 +3143,8 @@ fn associated_item_def_ids(tcx: TyCtxt<'_>, def_id: DefId) -> &[DefId] {
                 .map(|trait_item_ref| trait_item_ref.id)
                 .map(|id| tcx.hir().local_def_id(id.hir_id)),
         ),
-        hir::ItemKind::Impl(.., ref impl_item_refs) => tcx.arena.alloc_from_iter(
-            impl_item_refs
+        hir::ItemKind::Impl { ref items, .. } => tcx.arena.alloc_from_iter(
+            items
                 .iter()
                 .map(|impl_item_ref| impl_item_ref.id)
                 .map(|id| tcx.hir().local_def_id(id.hir_id)),
