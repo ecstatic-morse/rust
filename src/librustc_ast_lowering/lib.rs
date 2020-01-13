@@ -1250,7 +1250,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     let bounds =
                         this.arena.alloc_from_iter(bounds.iter().filter_map(
                             |bound| match *bound {
-                                GenericBound::Trait(ref ty, TraitBoundModifier::None) => {
+                                GenericBound::Trait(ref ty, TraitBoundModifier::None)
+                                | GenericBound::Trait(ref ty, TraitBoundModifier::MaybeConst) => {
                                     Some(this.lower_poly_trait_ref(ty, itctx.reborrow()))
                                 }
                                 GenericBound::Trait(_, TraitBoundModifier::Maybe) => None,
@@ -1995,7 +1996,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         match *tpb {
             GenericBound::Trait(ref ty, modifier) => hir::GenericBound::Trait(
                 self.lower_poly_trait_ref(ty, itctx),
-                self.lower_trait_bound_modifier(modifier),
+                self.lower_trait_bound_modifier(modifier, tpb.span()),
             ),
             GenericBound::Outlives(ref lifetime) => {
                 hir::GenericBound::Outlives(self.lower_lifetime(lifetime))
@@ -2156,10 +2157,6 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         p: &PolyTraitRef,
         mut itctx: ImplTraitContext<'_, 'hir>,
     ) -> hir::PolyTraitRef<'hir> {
-        if p.trait_ref.constness.is_some() {
-            self.diagnostic().span_err(p.span, "`?const` on trait bounds is not yet implemented");
-        }
-
         let bound_generic_params = self.lower_generic_params(
             &p.bound_generic_params,
             &NodeMap::default(),
@@ -2295,10 +2292,20 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         }
     }
 
-    fn lower_trait_bound_modifier(&mut self, f: TraitBoundModifier) -> hir::TraitBoundModifier {
+    fn lower_trait_bound_modifier(
+        &mut self,
+        f: TraitBoundModifier,
+        span: Span,
+    ) -> hir::TraitBoundModifier {
         match f {
             TraitBoundModifier::None => hir::TraitBoundModifier::None,
             TraitBoundModifier::Maybe => hir::TraitBoundModifier::Maybe,
+            TraitBoundModifier::MaybeConst => {
+                self.diagnostic()
+                    .struct_span_err(span, "`?const` on trait bounds is not yet implemented")
+                    .emit();
+                hir::TraitBoundModifier::None
+            }
         }
     }
 
